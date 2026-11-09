@@ -4,6 +4,9 @@
   const WORKER =
     'https://malaysia-company-research.rimli271.workers.dev';
 
+  const WIKIDATA_API =
+    'https://www.wikidata.org/w/api.php';
+
   const SHEET = 'Company Master';
   const FIRST_ROW = 7;
   const NOTE_COLUMN = 'AP';
@@ -14,7 +17,6 @@
 
   let active = false;
   let initializing = false;
-  let handlerResult = null;
   let requestNumber = 0;
 
   function show(message) {
@@ -22,9 +24,7 @@
   }
 
   function errorText(error) {
-    return String(
-      (error && (error.message || error.stack)) || error
-    );
+    return String(error?.message || error);
   }
 
   function clearResults() {
@@ -33,12 +33,22 @@
 
   function addText(parent, tag, value, className) {
     const element = document.createElement(tag);
-    element.textContent = String(value);
+    element.textContent = String(value ?? '');
 
     if (className) element.className = className;
 
     parent.appendChild(element);
     return element;
+  }
+
+  function addLink(parent, text, url) {
+    const link = document.createElement('a');
+    link.href = url;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    link.textContent = text;
+    parent.appendChild(link);
+    return link;
   }
 
   function columnNumber(letters) {
@@ -49,7 +59,7 @@
     );
   }
 
-  function rowFromAddress(address) {
+  function changedRow(address) {
     const local = String(address || '')
       .split('!')
       .pop()
@@ -61,35 +71,295 @@
 
     if (!match) return null;
 
-    const left = columnNumber(match[1]);
-    const right = columnNumber(match[3] || match[1]);
+    const firstColumn = columnNumber(match[1]);
+    const lastColumn = columnNumber(match[3] || match[1]);
 
-    if (left > 4 || right < 4) return null;
-
-    const first = Number(match[2]);
-    const last = Number(match[4] || match[2]);
-
-    if (last < FIRST_ROW) return null;
-
-    const start = Math.max(FIRST_ROW, first);
-
-    if (start !== last) {
-      return { multiple: true, start, last };
+    if (firstColumn > 4 || lastColumn < 4) {
+      return null;
     }
 
-    return { multiple: false, row: start };
+    const firstRow = Number(match[2]);
+    const lastRow = Number(match[4] || match[2]);
+
+    if (lastRow < FIRST_ROW) return null;
+
+    const start = Math.max(firstRow, FIRST_ROW);
+
+    if (start !== lastRow) {
+      return { multiple: true };
+    }
+
+    return { row: start, multiple: false };
   }
 
   async function readCompany(row) {
     return Excel.run(async context => {
-      const sheet = context.workbook.worksheets.getItem(SHEET);
-      const cell = sheet.getRange('D' + row);
+      const sheet =
+        context.workbook.worksheets.getItem(SHEET);
 
+      const cell = sheet.getRange('D' + row);
       cell.load('values');
+
       await context.sync();
 
       return String(cell.values[0][0] ?? '').trim();
     });
+  }
+
+  async function wikidataRequest(parameters) {
+    const query = new URLSearchParams({
+      action: 'wbgetentities',
+      format: 'json',
+      origin: '*',
+      ...parameters
+    });
+
+    const controller = new AbortController();
+    const timeout = setTimeout(
+      () => controller.abort(),
+      15000
+    );
+
+    try {
+      const response = await fetch(
+        WIKIDATA_API + '?' + query.toString(),
+        {
+          method: 'GET',
+          signal: controller.signal
+        }
+      );
+
+      if (!response.ok) {
+        throw new Error(
+          'Wikidata returned HTTP ' + response.status
+        );
+      }
+
+      const data = await response.json();
+
+      if (data.error) {
+        throw new Error(
+          data.error.info || 'Wikidata API error'
+        );
+      }
+
+      return data.entities || {};
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  function statementValues(entity, property) {
+    const statements = entity?.claims?.[property] || [];
+
+    const valid = statements.filter(statement => {
+      return (
+        statement.rank !== 'deprecated' &&
+        statement.mainsnak?.snaktype === 'value' &&
+        statement.mainsnak?.datavalue
+      );
+    });
+
+    const preferred = valid.filter(
+      statement => statement.rank === 'preferred'
+    );
+
+    const chosen = preferred.length ? preferred : valid;
+
+    return chosen
+      .map(statement =>
+        statement.mainsnak.datavalue.value
+      )
+      .slice(0, 5);
+  }
+
+  function itemIds(values) {
+    return values
+      .map(value => {
+        if (value?.id && /^Q\d+$/.test(value.id)) {
+          return value.id;
+        }
+
+        if (
+          value?.['entity-type'] === 'item' &&
+          Number.isInteger(value['numeric-id'])
+        ) {
+          return 'Q' + value['numeric-id'];
+        }
+
+        return null;
+      })
+      .filter(Boolean);
+  }
+
+  async function fetchCompanyDetails(id) {
+    if (!/^Q\d+$/.test(id)) {
+      throw new Error('Invalid Wikidata ID.');
+    }
+
+    const entities = await wikidataRequest({
+      ids: id,
+      props: 'claims|labels|descriptions',
+      languages: 'en'
+    });
+
+    const entity = entities[id];
+
+    if (!entity || entity.missing !== undefined) {
+      throw new Error('Wikidata entity not found.');
+    }
+
+    const fields = [
+      {
+        column: 'E',
+        title: 'Company Type',
+        property: 'P31'
+      },
+      {
+        column: 'F',
+        title: 'Company Headquarters',
+        property: 'P159'
+      },
+      {
+        column: 'G',
+        title: 'Industry',
+        property: 'P452'
+      },
+      {
+        column: 'K',
+        title: 'Company Website',
+        property: 'P856'
+      }
+    ];
+
+    const raw = {};
+
+    for (const field of fields) {
+      raw[field.property] =
+        statementValues(entity, field.property);
+    }
+
+    const relatedIds = [
+      ...new Set([
+        ...itemIds(raw.P31),
+        ...itemIds(raw.P159),
+        ...itemIds(raw.P452)
+      ])
+    ];
+
+    let related = {};
+
+    if (relatedIds.length) {
+      related = await wikidataRequest({
+        ids: relatedIds.join('|'),
+        props: 'labels',
+        languages: 'en',
+        languagefallback: '1'
+      });
+    }
+
+    return fields.map(field => {
+      const values = raw[field.property];
+
+      let displayValues = [];
+
+      if (field.property === 'P856') {
+        displayValues = values.filter(value => {
+          if (typeof value !== 'string') return false;
+
+          try {
+            const url = new URL(value);
+            return (
+              url.protocol === 'https:' ||
+              url.protocol === 'http:'
+            );
+          } catch {
+            return false;
+          }
+        });
+      } else {
+        displayValues = itemIds(values).map(relatedId => {
+          return (
+            related[relatedId]?.labels?.en?.value ||
+            relatedId
+          );
+        });
+      }
+
+      return {
+        ...field,
+        values: [...new Set(displayValues)],
+        source:
+          'https://www.wikidata.org/wiki/' +
+          id + '#' + field.property
+      };
+    });
+  }
+
+  function renderDetails(parent, fields) {
+    const section = document.createElement('div');
+
+    section.style.marginTop = '14px';
+    section.style.padding = '12px';
+    section.style.border = '1px solid #cbd5df';
+    section.style.borderRadius = '8px';
+
+    addText(
+      section,
+      'h3',
+      'V7 — Company Details Preview'
+    );
+
+    addText(
+      section,
+      'p',
+      'Wikidata-reported values only. ' +
+      'These have not been verified for Malaysia.'
+    );
+
+    fields.forEach(field => {
+      const item = document.createElement('div');
+
+      item.style.padding = '10px 0';
+      item.style.borderBottom =
+        '1px solid #e5e7eb';
+
+      addText(
+        item,
+        'strong',
+        field.column + ' — ' + field.title
+      );
+
+      const value = field.values.length
+        ? field.values.join('; ')
+        : 'Not available from this Wikidata record';
+
+      addText(item, 'p', value);
+
+      addLink(
+        item,
+        'View Wikidata property source',
+        field.source
+      );
+
+      addText(
+        item,
+        'p',
+        'Status: Not independently verified',
+        'small'
+      );
+
+      section.appendChild(item);
+    });
+
+    addText(
+      section,
+      'p',
+      'Preview only — columns E, F, G and K ' +
+      'have not been changed.'
+    );
+
+    parent.appendChild(section);
   }
 
   async function approveAndSave(
@@ -99,27 +369,21 @@
     button,
     message
   ) {
-    if (!candidate || !candidate.wikidata_id) {
-      show('Cannot save: candidate has no Wikidata ID.');
-      return;
-    }
-
-    const id = String(candidate.wikidata_id);
+    const id = String(candidate.wikidata_id || '');
 
     if (!/^Q\d+$/.test(id)) {
       show('Cannot save: invalid Wikidata ID.');
       return;
     }
 
-    const source = 'https://www.wikidata.org/entity/' + id;
-
     const note = [
       'UNVERIFIED RESEARCH CANDIDATE',
       'Searched company: ' + company,
       'Candidate: ' + String(candidate.name || ''),
-      'Description: ' + String(candidate.description || ''),
+      'Description: ' +
+        String(candidate.description || ''),
       'Wikidata ID: ' + id,
-      'Source: ' + source,
+      'Source: https://www.wikidata.org/entity/' + id,
       'Malaysia-specific identity NOT verified.',
       'Further verification required before relying on this data.'
     ].join('\n');
@@ -129,10 +393,12 @@
 
     try {
       const outcome = await Excel.run(async context => {
-        const sheet = context.workbook.worksheets.getItem(SHEET);
+        const sheet =
+          context.workbook.worksheets.getItem(SHEET);
 
         const nameCell = sheet.getRange('D' + row);
-        const noteCell = sheet.getRange(NOTE_COLUMN + row);
+        const noteCell =
+          sheet.getRange(NOTE_COLUMN + row);
 
         nameCell.load('values');
         noteCell.load('values,formulas');
@@ -154,16 +420,17 @@
 
         if (
           (existing !== null &&
-           existing !== undefined &&
-           String(existing).trim() !== '') ||
+            existing !== undefined &&
+            String(existing).trim() !== '') ||
           (typeof formula === 'string' &&
-           formula.startsWith('='))
+            formula.startsWith('='))
         ) {
           return {
             saved: false,
             reason:
               'AP' + row +
-              ' already contains data or a formula. Nothing overwritten.'
+              ' already contains data or a formula. ' +
+              'Nothing overwritten.'
           };
         }
 
@@ -183,30 +450,20 @@
 
       show(
         'SAVE COMPLETE\n' +
-        'Company: ' + company + '\n' +
-        'Saved to: ' + NOTE_COLUMN + row + '\n' +
-        'Unverified candidate and source recorded.\n' +
-        'All other cells left unchanged.'
+        'Saved unverified note to AP' + row + '.\n' +
+        'Columns E, F, G and K unchanged.'
       );
 
       message.textContent =
-        'Saved to ' + NOTE_COLUMN + row +
-        '. This is an unverified research note, not a confirmed company profile.';
+        'Saved to AP' + row +
+        '. Company details remain preview-only.';
 
       button.textContent = 'Saved to Excel';
     } catch (error) {
-      const explanation = errorText(error);
-
-      show(
-        'SAVE ERROR\n' +
-        explanation + '\n\n' +
-        'If Excel reports insufficient permissions, ' +
-        'the add-in manifest must be updated to ' +
-        'ReadWriteDocument.'
-      );
+      show('SAVE ERROR\n' + errorText(error));
 
       message.textContent =
-        'Save was not confirmed. Check the error above.';
+        'Save not confirmed. See error above.';
 
       button.disabled = false;
       button.textContent = 'Approve & save note';
@@ -216,19 +473,25 @@
   function renderCandidates(company, row, candidates, token) {
     clearResults();
 
-    if (!results) {
-      show('Missing HTML element: results');
-      return;
-    }
+    if (!results) return;
 
-    addText(results, 'h2', 'Review research for D' + row);
-    addText(results, 'p', 'Searched: ' + company);
+    addText(
+      results,
+      'h2',
+      'Review research for D' + row
+    );
+
+    addText(
+      results,
+      'p',
+      'Searched: ' + company
+    );
 
     if (!candidates.length) {
       addText(
         results,
         'p',
-        'No candidates found. Nothing was changed.'
+        'No candidates found. Nothing changed.'
       );
       return;
     }
@@ -236,6 +499,10 @@
     candidates.forEach(candidate => {
       const card = document.createElement('div');
       card.className = 'candidate';
+
+      const id = String(
+        candidate.wikidata_id || ''
+      );
 
       addText(
         card,
@@ -246,30 +513,23 @@
       addText(
         card,
         'p',
-        candidate.description || 'No description available.'
+        candidate.description ||
+          'No description available.'
       );
 
       addText(
         card,
         'p',
-        'Wikidata ID: ' +
-          String(candidate.wikidata_id || 'Unavailable'),
+        'Wikidata ID: ' + id,
         'small'
       );
 
-      const id = String(candidate.wikidata_id || '');
-
       if (/^Q\d+$/.test(id)) {
-        const link = document.createElement('a');
-
-        link.href =
-          'https://www.wikidata.org/entity/' + id;
-
-        link.target = '_blank';
-        link.rel = 'noopener noreferrer';
-        link.textContent = 'Open Wikidata source';
-
-        card.appendChild(link);
+        addLink(
+          card,
+          'Open Wikidata source',
+          'https://www.wikidata.org/wiki/' + id
+        );
       }
 
       addText(
@@ -290,9 +550,14 @@
         'small'
       );
 
-      select.addEventListener('click', () => {
+      select.addEventListener('click', async () => {
         if (token !== requestNumber) {
-          show('These results are outdated. Research again.');
+          show('Results outdated. Research again.');
+          return;
+        }
+
+        if (!/^Q\d+$/.test(id)) {
+          show('Invalid candidate ID.');
           return;
         }
 
@@ -305,7 +570,7 @@
         message.textContent =
           'Selected: ' +
           String(candidate.name || '') +
-          '. This is not a verified Malaysian company match.';
+          '. Malaysian identity not verified.';
 
         const approve = document.createElement('button');
         approve.type = 'button';
@@ -313,7 +578,7 @@
 
         approve.addEventListener('click', async () => {
           if (token !== requestNumber) {
-            show('Research changed. Please select a current result.');
+            show('Research changed. Select again.');
             return;
           }
 
@@ -328,15 +593,61 @@
 
         card.appendChild(approve);
 
-        show(
-          'SELECTED FOR REVIEW\n' +
-          'Company: ' + company + '\n' +
-          'Candidate: ' + String(candidate.name || '') + '\n' +
-          'Wikidata ID: ' + id + '\n\n' +
-          'Tap Approve & save note to write the unverified ' +
-          'source information into AP' + row + '.\n' +
-          'No other cells will be changed.'
+        const details = document.createElement('div');
+        addText(
+          details,
+          'p',
+          'Loading company details from Wikidata...'
         );
+
+        card.appendChild(details);
+
+        show(
+          'V7: Candidate selected.\n' +
+          'Loading details for ' + id + '.\n' +
+          'No Excel cells changed.'
+        );
+
+        try {
+          const fields = await fetchCompanyDetails(id);
+
+          if (token !== requestNumber) return;
+
+          details.replaceChildren();
+          renderDetails(details, fields);
+
+          show(
+            'V7 DETAILS READY\n' +
+            'Company: ' + company + '\n' +
+            'Wikidata: ' + id + '\n' +
+            'Review E, F, G and K below.\n' +
+            'These are unverified preview values.\n' +
+            'No company-detail cells changed.'
+          );
+        } catch (error) {
+          if (token !== requestNumber) return;
+
+          details.replaceChildren();
+
+          addText(
+            details,
+            'p',
+            'Details unavailable: ' + errorText(error)
+          );
+
+          addText(
+            details,
+            'p',
+            'Candidate selection and AP note saving ' +
+            'remain available.'
+          );
+
+          show(
+            'V7 DETAIL LOOKUP ERROR\n' +
+            errorText(error) + '\n' +
+            'No company-detail cells changed.'
+          );
+        }
       });
 
       card.appendChild(select);
@@ -354,8 +665,8 @@
       clearResults();
 
       show(
-        'All candidates rejected for D' + row +
-        '.\nNo Excel cells changed.'
+        'All candidates rejected.\n' +
+        'No Excel cells changed.'
       );
     });
 
@@ -368,37 +679,33 @@
     clearResults();
 
     show(
-      'RESEARCHING\n' +
+      'V7 RESEARCHING\n' +
       'Cell: D' + row + '\n' +
-      'Company: ' + company + '\n' +
-      'Source: Wikidata via Cloudflare Worker\n' +
-      'No Excel cells changed.'
+      'Company: ' + company
     );
 
     const controller = new AbortController();
-
     const timeout = setTimeout(
       () => controller.abort(),
       20000
     );
 
     try {
-      const url =
+      const response = await fetch(
         WORKER +
-        '/research?company=' +
-        encodeURIComponent(company);
-
-      const response = await fetch(url, {
-        method: 'GET',
-        headers: {
-          Accept: 'application/json'
-        },
-        signal: controller.signal
-      });
+          '/research?company=' +
+          encodeURIComponent(company),
+        {
+          headers: {
+            Accept: 'application/json'
+          },
+          signal: controller.signal
+        }
+      );
 
       if (!response.ok) {
         throw new Error(
-          'Research service returned HTTP ' + response.status
+          'Research HTTP ' + response.status
         );
       }
 
@@ -411,23 +718,24 @@
         : [];
 
       show(
-        'RESEARCH COMPLETE\n' +
-        'Company: ' + company + '\n' +
+        'V7 RESEARCH COMPLETE\n' +
         'Candidates: ' + candidates.length + '\n' +
-        'Review and select a candidate below.\n' +
-        'No Excel cells changed.'
+        'Select one to preview company details.'
       );
 
-      renderCandidates(company, row, candidates, token);
+      renderCandidates(
+        company,
+        row,
+        candidates,
+        token
+      );
     } catch (error) {
       if (token !== requestNumber) return;
 
       clearResults();
 
       show(
-        'RESEARCH ERROR\n' +
-        errorText(error) +
-        '\nNo Excel cells changed.'
+        'RESEARCH ERROR\n' + errorText(error)
       );
     } finally {
       clearTimeout(timeout);
@@ -436,7 +744,7 @@
 
   async function onChanged(event) {
     try {
-      const location = rowFromAddress(event.address);
+      const location = changedRow(event.address);
 
       if (!location) return;
 
@@ -446,8 +754,7 @@
 
         show(
           'Multiple company rows edited.\n' +
-          'Please research one company at a time.\n' +
-          'No Excel cells changed.'
+          'Please research one row at a time.'
         );
 
         return;
@@ -461,8 +768,7 @@
         clearResults();
 
         show(
-          'D' + row + ' is blank.\n' +
-          'No Excel cells changed.'
+          'D' + row + ' is blank.'
         );
 
         return;
@@ -480,51 +786,25 @@
   async function initialize() {
     if (active) {
       show(
-        'V6 READY\n' +
-        'Monitoring Company Master column D, row 7 onward.\n' +
-        'Edit D7 to research a company.\n' +
-        'Approval required before saving.'
+        'V7 READY\n' +
+        'Monitoring Company Master D7 onward.\n' +
+        'Edit D7 to start research.'
       );
-
       return;
     }
 
     if (initializing) return;
 
     initializing = true;
-    show('V6: Connecting to Excel...');
-
-    let timer;
+    show('V7: Connecting to Excel...');
 
     try {
-      if (
-        typeof Office === 'undefined' ||
-        typeof Office.onReady !== 'function'
-      ) {
-        throw new Error('Office.js is unavailable.');
-      }
-
-      const info = await Promise.race([
-        Office.onReady(),
-        new Promise((_, reject) => {
-          timer = setTimeout(
-            () => reject(
-              new Error('Office connection timed out.')
-            ),
-            15000
-          );
-        })
-      ]);
-
-      if (
-        !info ||
-        info.host !== Office.HostType.Excel
-      ) {
-        throw new Error('Excel host unavailable.');
-      }
+      await Office.onReady();
 
       if (typeof Excel === 'undefined') {
-        throw new Error('Excel JavaScript API unavailable.');
+        throw new Error(
+          'Excel JavaScript API unavailable.'
+        );
       }
 
       await Excel.run(async context => {
@@ -536,31 +816,31 @@
 
         if (sheet.isNullObject) {
           throw new Error(
-            'Worksheet "Company Master" not found.'
+            'Company Master sheet not found.'
           );
         }
 
-        handlerResult = sheet.onChanged.add(onChanged);
-
+        sheet.onChanged.add(onChanged);
         await context.sync();
       });
 
       active = true;
 
       show(
-        'V6 READY — SAFE APPROVAL MODE\n' +
-        'Monitoring Company Master column D, row 7 onward.\n' +
-        'Edit D7 to start research.\n' +
-        'Select a candidate, then approve a note.\n' +
-        'Existing data and formulas are protected.'
+        'V7 READY — COMPANY DETAILS PREVIEW\n' +
+        'Monitoring Company Master column D, ' +
+        'row 7 onward.\n' +
+        'Edit D7 to research.\n' +
+        'Select a candidate to preview E, F, G, K.\n' +
+        'Company details will NOT be written.\n' +
+        'AP note saving remains approval-only.'
       );
     } catch (error) {
       show(
-        'V6 CONNECTION ERROR\n' +
+        'V7 CONNECTION ERROR\n' +
         errorText(error)
       );
     } finally {
-      clearTimeout(timer);
       initializing = false;
     }
   }
