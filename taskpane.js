@@ -5,6 +5,8 @@
     'https://malaysia-company-research.rimli271.workers.dev';
 
   const SHEET = 'Company Master';
+  const FIRST_ROW = 7;
+  const NOTE_COLUMN = 'AP';
 
   const status = document.getElementById('status');
   const results = document.getElementById('results');
@@ -15,20 +17,42 @@
   let handlerResult = null;
   let requestNumber = 0;
 
-  const show = message => {
+  function show(message) {
     if (status) status.textContent = message;
-  };
+  }
 
-  const detail = error =>
-    String((error && (error.message || error.stack)) || error);
+  function errorText(error) {
+    return String(
+      (error && (error.message || error.stack)) || error
+    );
+  }
 
   function clearResults() {
     if (results) results.replaceChildren();
   }
 
-  function rowRangeFromAddress(address) {
+  function addText(parent, tag, value, className) {
+    const element = document.createElement(tag);
+    element.textContent = String(value);
+
+    if (className) element.className = className;
+
+    parent.appendChild(element);
+    return element;
+  }
+
+  function columnNumber(letters) {
+    return [...letters].reduce(
+      (number, letter) =>
+        number * 26 + letter.charCodeAt(0) - 64,
+      0
+    );
+  }
+
+  function rowFromAddress(address) {
     const local = String(address || '')
-      .split('!').pop()
+      .split('!')
+      .pop()
       .replace(/\$/g, '')
       .toUpperCase();
 
@@ -37,38 +61,163 @@
 
     if (!match) return null;
 
-    const columnNumber = letters =>
-      [...letters].reduce(
-        (n, c) => n * 26 + c.charCodeAt(0) - 64,
-        0
-      );
-
     const left = columnNumber(match[1]);
     const right = columnNumber(match[3] || match[1]);
 
     if (left > 4 || right < 4) return null;
 
-    const start = Math.max(7, Number(match[2]));
-    const end = Number(match[4] || match[2]);
+    const first = Number(match[2]);
+    const last = Number(match[4] || match[2]);
 
-    return end >= start ? { start, end } : null;
+    if (last < FIRST_ROW) return null;
+
+    const start = Math.max(FIRST_ROW, first);
+
+    if (start !== last) {
+      return { multiple: true, start, last };
+    }
+
+    return { multiple: false, row: start };
   }
 
-  function addText(parent, tag, value, className) {
-    const element = document.createElement(tag);
-    element.textContent = value;
+  async function readCompany(row) {
+    return Excel.run(async context => {
+      const sheet = context.workbook.worksheets.getItem(SHEET);
+      const cell = sheet.getRange('D' + row);
 
-    if (className) element.className = className;
+      cell.load('values');
+      await context.sync();
 
-    parent.appendChild(element);
-    return element;
+      return String(cell.values[0][0] ?? '').trim();
+    });
   }
 
-  function renderCandidates(company, row, candidates) {
+  async function approveAndSave(
+    company,
+    row,
+    candidate,
+    button,
+    message
+  ) {
+    if (!candidate || !candidate.wikidata_id) {
+      show('Cannot save: candidate has no Wikidata ID.');
+      return;
+    }
+
+    const id = String(candidate.wikidata_id);
+
+    if (!/^Q\d+$/.test(id)) {
+      show('Cannot save: invalid Wikidata ID.');
+      return;
+    }
+
+    const source = 'https://www.wikidata.org/entity/' + id;
+
+    const note = [
+      'UNVERIFIED RESEARCH CANDIDATE',
+      'Searched company: ' + company,
+      'Candidate: ' + String(candidate.name || ''),
+      'Description: ' + String(candidate.description || ''),
+      'Wikidata ID: ' + id,
+      'Source: ' + source,
+      'Malaysia-specific identity NOT verified.',
+      'Further verification required before relying on this data.'
+    ].join('\n');
+
+    button.disabled = true;
+    button.textContent = 'Checking Excel...';
+
+    try {
+      const outcome = await Excel.run(async context => {
+        const sheet = context.workbook.worksheets.getItem(SHEET);
+
+        const nameCell = sheet.getRange('D' + row);
+        const noteCell = sheet.getRange(NOTE_COLUMN + row);
+
+        nameCell.load('values');
+        noteCell.load('values,formulas');
+
+        await context.sync();
+
+        const currentCompany =
+          String(nameCell.values[0][0] ?? '').trim();
+
+        if (currentCompany !== company) {
+          return {
+            saved: false,
+            reason: 'Company name changed. Research again.'
+          };
+        }
+
+        const existing = noteCell.values[0][0];
+        const formula = noteCell.formulas[0][0];
+
+        if (
+          (existing !== null &&
+           existing !== undefined &&
+           String(existing).trim() !== '') ||
+          (typeof formula === 'string' &&
+           formula.startsWith('='))
+        ) {
+          return {
+            saved: false,
+            reason:
+              'AP' + row +
+              ' already contains data or a formula. Nothing overwritten.'
+          };
+        }
+
+        noteCell.values = [[note]];
+        await context.sync();
+
+        return { saved: true };
+      });
+
+      if (!outcome.saved) {
+        show('SAVE BLOCKED\n' + outcome.reason);
+        message.textContent = outcome.reason;
+        button.disabled = false;
+        button.textContent = 'Approve & save note';
+        return;
+      }
+
+      show(
+        'SAVE COMPLETE\n' +
+        'Company: ' + company + '\n' +
+        'Saved to: ' + NOTE_COLUMN + row + '\n' +
+        'Unverified candidate and source recorded.\n' +
+        'All other cells left unchanged.'
+      );
+
+      message.textContent =
+        'Saved to ' + NOTE_COLUMN + row +
+        '. This is an unverified research note, not a confirmed company profile.';
+
+      button.textContent = 'Saved to Excel';
+    } catch (error) {
+      const explanation = errorText(error);
+
+      show(
+        'SAVE ERROR\n' +
+        explanation + '\n\n' +
+        'If Excel reports insufficient permissions, ' +
+        'the add-in manifest must be updated to ' +
+        'ReadWriteDocument.'
+      );
+
+      message.textContent =
+        'Save was not confirmed. Check the error above.';
+
+      button.disabled = false;
+      button.textContent = 'Approve & save note';
+    }
+  }
+
+  function renderCandidates(company, row, candidates, token) {
     clearResults();
 
     if (!results) {
-      show('ERROR: Results panel not found.');
+      show('Missing HTML element: results');
       return;
     }
 
@@ -79,12 +228,10 @@
       addText(
         results,
         'p',
-        'No candidates found. No Excel cells changed.'
+        'No candidates found. Nothing was changed.'
       );
       return;
     }
-
-    const cards = [];
 
     candidates.forEach(candidate => {
       const card = document.createElement('div');
@@ -93,42 +240,42 @@
       addText(
         card,
         'h3',
-        String(candidate.name || 'Unnamed candidate')
+        candidate.name || 'Unnamed candidate'
       );
 
       addText(
         card,
         'p',
-        String(
-          candidate.description || 'No description available.'
-        )
+        candidate.description || 'No description available.'
       );
 
       addText(
         card,
         'p',
         'Wikidata ID: ' +
-          String(candidate.wikidata_id || 'Not provided'),
+          String(candidate.wikidata_id || 'Unavailable'),
         'small'
       );
 
-      if (
-        typeof candidate.source === 'string' &&
-        /^https:\/\/(www\.)?wikidata\.org\/(wiki\/|entity\/)Q\d+$/i
-          .test(candidate.source)
-      ) {
+      const id = String(candidate.wikidata_id || '');
+
+      if (/^Q\d+$/.test(id)) {
         const link = document.createElement('a');
-        link.href = candidate.source;
+
+        link.href =
+          'https://www.wikidata.org/entity/' + id;
+
         link.target = '_blank';
         link.rel = 'noopener noreferrer';
-        link.textContent = 'View Wikidata source';
+        link.textContent = 'Open Wikidata source';
+
         card.appendChild(link);
       }
 
       addText(
         card,
         'p',
-        'Not yet verified as the correct Malaysian company.',
+        'Not verified as the correct Malaysian company.',
         'small'
       );
 
@@ -136,63 +283,64 @@
       select.type = 'button';
       select.textContent = 'Select for review';
 
+      const message = addText(
+        card,
+        'p',
+        '',
+        'small'
+      );
+
       select.addEventListener('click', () => {
-        // Clear previous selection indicators.
-        cards.forEach(item => {
-          item.card.style.border = '';
-          item.card.style.background = '';
-          item.button.disabled = false;
-          item.button.textContent = 'Select for review';
+        if (token !== requestNumber) {
+          show('These results are outdated. Research again.');
+          return;
+        }
 
-          const oldNotice =
-            item.card.querySelector('.selection-notice');
+        card.style.border = '2px solid #13865c';
+        card.style.background = '#edf8f2';
 
-          if (oldNotice) oldNotice.remove();
-        });
-
-        // Highlight selected candidate.
-        card.style.border = '2px solid #16865d';
-        card.style.background = '#eefaf3';
-
-        select.textContent = '✓ Selected for review';
         select.disabled = true;
+        select.textContent = 'Selected for review';
 
-        // Show confirmation immediately below the button.
-        const notice = document.createElement('p');
-        notice.className = 'selection-notice';
-        notice.style.padding = '10px';
-        notice.style.borderRadius = '8px';
-        notice.style.background = '#dff5e8';
-        notice.style.color = '#145a32';
-        notice.style.fontWeight = '600';
-
-        notice.textContent =
+        message.textContent =
           'Selected: ' +
           String(candidate.name || '') +
-          ' (Wikidata ' +
-          String(candidate.wikidata_id || '') +
-          '). Further verification required. ' +
-          'No Excel cells changed.';
+          '. This is not a verified Malaysian company match.';
 
-        card.appendChild(notice);
+        const approve = document.createElement('button');
+        approve.type = 'button';
+        approve.textContent = 'Approve & save note';
+
+        approve.addEventListener('click', async () => {
+          if (token !== requestNumber) {
+            show('Research changed. Please select a current result.');
+            return;
+          }
+
+          await approveAndSave(
+            company,
+            row,
+            candidate,
+            approve,
+            message
+          );
+        });
+
+        card.appendChild(approve);
 
         show(
           'SELECTED FOR REVIEW\n' +
-          'Excel row: D' + row + '\n' +
-          'Company searched: ' + company + '\n' +
-          'Candidate: ' +
-          String(candidate.name || '') + '\n' +
-          'Wikidata ID: ' +
-          String(candidate.wikidata_id || '') +
-          '\n\nSelection recorded in this panel only.' +
-          '\nNo Excel cells changed.'
+          'Company: ' + company + '\n' +
+          'Candidate: ' + String(candidate.name || '') + '\n' +
+          'Wikidata ID: ' + id + '\n\n' +
+          'Tap Approve & save note to write the unverified ' +
+          'source information into AP' + row + '.\n' +
+          'No other cells will be changed.'
         );
       });
 
       card.appendChild(select);
       results.appendChild(card);
-
-      cards.push({ card, button: select });
     });
 
     const reject = document.createElement('button');
@@ -200,13 +348,14 @@
     reject.textContent = 'Reject all candidates';
 
     reject.addEventListener('click', () => {
+      if (token !== requestNumber) return;
+
       ++requestNumber;
       clearResults();
 
       show(
-        'ALL CANDIDATES REJECTED\n' +
-        'Cell: D' + row + '\n' +
-        'No Excel cells changed.'
+        'All candidates rejected for D' + row +
+        '.\nNo Excel cells changed.'
       );
     });
 
@@ -214,42 +363,38 @@
   }
 
   async function research(company, row) {
-    const currentRequest = ++requestNumber;
+    const token = ++requestNumber;
+
     clearResults();
 
     show(
       'RESEARCHING\n' +
       'Cell: D' + row + '\n' +
       'Company: ' + company + '\n' +
-      'Source: free Wikidata search\n' +
-      'No Excel cells will be changed.'
+      'Source: Wikidata via Cloudflare Worker\n' +
+      'No Excel cells changed.'
+    );
+
+    const controller = new AbortController();
+
+    const timeout = setTimeout(
+      () => controller.abort(),
+      20000
     );
 
     try {
-      const controller = new AbortController();
-      const timeout = setTimeout(
-        () => controller.abort(),
-        20000
-      );
+      const url =
+        WORKER +
+        '/research?company=' +
+        encodeURIComponent(company);
 
-      let response;
-
-      try {
-        const url =
-          WORKER +
-          '/research?company=' +
-          encodeURIComponent(company);
-
-        response = await fetch(url, {
-          method: 'GET',
-          signal: controller.signal,
-          headers: {
-            Accept: 'application/json'
-          }
-        });
-      } finally {
-        clearTimeout(timeout);
-      }
+      const response = await fetch(url, {
+        method: 'GET',
+        headers: {
+          Accept: 'application/json'
+        },
+        signal: controller.signal
+      });
 
       if (!response.ok) {
         throw new Error(
@@ -259,98 +404,75 @@
 
       const data = await response.json();
 
-      if (currentRequest !== requestNumber) return;
+      if (token !== requestNumber) return;
 
       const candidates = Array.isArray(data.candidates)
         ? data.candidates
         : [];
 
-      if (data.status &&
-          data.status !== 'candidates_for_review') {
-        show(
-          'RESEARCH RESPONSE\n' +
-          'Status: ' + data.status + '\n' +
-          'Company: ' + company + '\n' +
-          'No Excel cells changed.'
-        );
-      } else {
-        show(
-          'RESEARCH COMPLETE\n' +
-          'Company: ' + company + '\n' +
-          'Candidates: ' + candidates.length + '\n' +
-          'Select the correct company below.\n' +
-          'No Excel cells changed.'
-        );
-      }
+      show(
+        'RESEARCH COMPLETE\n' +
+        'Company: ' + company + '\n' +
+        'Candidates: ' + candidates.length + '\n' +
+        'Review and select a candidate below.\n' +
+        'No Excel cells changed.'
+      );
 
-      renderCandidates(company, row, candidates);
-
+      renderCandidates(company, row, candidates, token);
     } catch (error) {
-      if (currentRequest !== requestNumber) return;
+      if (token !== requestNumber) return;
 
       clearResults();
 
       show(
         'RESEARCH ERROR\n' +
-        detail(error) +
-        '\n\nNo Excel cells changed.'
+        errorText(error) +
+        '\nNo Excel cells changed.'
       );
+    } finally {
+      clearTimeout(timeout);
     }
   }
 
   async function onChanged(event) {
     try {
-      const rows = rowRangeFromAddress(event.address);
-      if (!rows) return;
+      const location = rowFromAddress(event.address);
 
-      if (rows.end !== rows.start) {
+      if (!location) return;
+
+      if (location.multiple) {
         ++requestNumber;
         clearResults();
 
         show(
-          'Multiple rows edited: ' +
-          rows.start + '–' + rows.end +
-          '.\nResearch one company at a time.' +
-          '\nNo Excel cells changed.'
+          'Multiple company rows edited.\n' +
+          'Please research one company at a time.\n' +
+          'No Excel cells changed.'
         );
+
         return;
       }
 
-      const row = rows.start;
-      let company = '';
-
-      await Excel.run(async context => {
-        const sheet =
-          context.workbook.worksheets.getItem(SHEET);
-
-        const cell = sheet.getRange('D' + row);
-        cell.load('values');
-
-        await context.sync();
-
-        company = String(
-          cell.values[0][0] == null
-            ? ''
-            : cell.values[0][0]
-        ).trim();
-      });
+      const row = location.row;
+      const company = await readCompany(row);
 
       if (!company) {
         ++requestNumber;
         clearResults();
 
         show(
-          'D' + row +
-          ' is blank.\nNo Excel cells changed.'
+          'D' + row + ' is blank.\n' +
+          'No Excel cells changed.'
         );
+
         return;
       }
 
       await research(company, row);
-
     } catch (error) {
       show(
-        'CHANGE EVENT ERROR\n' + detail(error)
+        'CHANGE EVENT ERROR\n' +
+        errorText(error)
       );
     }
   }
@@ -358,9 +480,12 @@
   async function initialize() {
     if (active) {
       show(
-        'MONITORING: Company Master column D, ' +
-        'row 7 onward.\nEdit a company name to begin research.'
+        'V6 READY\n' +
+        'Monitoring Company Master column D, row 7 onward.\n' +
+        'Edit D7 to research a company.\n' +
+        'Approval required before saving.'
       );
+
       return;
     }
 
@@ -376,7 +501,7 @@
         typeof Office === 'undefined' ||
         typeof Office.onReady !== 'function'
       ) {
-        throw new Error('Office.js unavailable.');
+        throw new Error('Office.js is unavailable.');
       }
 
       const info = await Promise.race([
@@ -391,8 +516,15 @@
         })
       ]);
 
-      if (!info || info.host !== Office.HostType.Excel) {
+      if (
+        !info ||
+        info.host !== Office.HostType.Excel
+      ) {
         throw new Error('Excel host unavailable.');
+      }
+
+      if (typeof Excel === 'undefined') {
+        throw new Error('Excel JavaScript API unavailable.');
       }
 
       await Excel.run(async context => {
@@ -404,27 +536,28 @@
 
         if (sheet.isNullObject) {
           throw new Error(
-            'Company Master worksheet not found.'
+            'Worksheet "Company Master" not found.'
           );
         }
 
         handlerResult = sheet.onChanged.add(onChanged);
+
         await context.sync();
       });
 
       active = true;
 
       show(
-        'V6 READY — REVIEW-FIRST MODE\n' +
+        'V6 READY — SAFE APPROVAL MODE\n' +
         'Monitoring Company Master column D, row 7 onward.\n' +
-        'Edit a company name to begin research.\n' +
-        'Select a candidate to see visible confirmation.\n' +
-        'No automatic Excel changes.'
+        'Edit D7 to start research.\n' +
+        'Select a candidate, then approve a note.\n' +
+        'Existing data and formulas are protected.'
       );
-
     } catch (error) {
       show(
-        'V6 CONNECTION ERROR\n' + detail(error)
+        'V6 CONNECTION ERROR\n' +
+        errorText(error)
       );
     } finally {
       clearTimeout(timer);
