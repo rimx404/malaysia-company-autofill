@@ -1,11 +1,9 @@
 (() => {
   'use strict';
 
+  const VERSION = '8';
   const WORKER =
     'https://malaysia-company-research.rimli271.workers.dev';
-
-  const WIKIDATA_API =
-    'https://www.wikidata.org/w/api.php';
 
   const SHEET = 'Company Master';
   const FIRST_ROW = 7;
@@ -42,13 +40,28 @@
   }
 
   function addLink(parent, text, url) {
-    const link = document.createElement('a');
-    link.href = url;
-    link.target = '_blank';
-    link.rel = 'noopener noreferrer';
-    link.textContent = text;
-    parent.appendChild(link);
-    return link;
+    if (typeof url !== 'string') return null;
+
+    try {
+      const parsed = new URL(url);
+
+      if (
+        parsed.protocol !== 'https:' &&
+        parsed.protocol !== 'http:'
+      ) {
+        return null;
+      }
+
+      const link = document.createElement('a');
+      link.href = parsed.href;
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      link.textContent = text;
+      parent.appendChild(link);
+      return link;
+    } catch {
+      return null;
+    }
   }
 
   function columnNumber(letters) {
@@ -72,7 +85,9 @@
     if (!match) return null;
 
     const firstColumn = columnNumber(match[1]);
-    const lastColumn = columnNumber(match[3] || match[1]);
+    const lastColumn = columnNumber(
+      match[3] || match[1]
+    );
 
     if (firstColumn > 4 || lastColumn < 4) {
       return null;
@@ -106,197 +121,72 @@
     });
   }
 
-  async function wikidataRequest(parameters) {
-    const query = new URLSearchParams({
-      action: 'wbgetentities',
-      format: 'json',
-      origin: '*',
-      ...parameters
-    });
-
-    const controller = new AbortController();
-    const timeout = setTimeout(
-      () => controller.abort(),
-      15000
-    );
-
-    try {
-      const response = await fetch(
-        WIKIDATA_API + '?' + query.toString(),
-        {
-          method: 'GET',
-          signal: controller.signal
-        }
-      );
-
-      if (!response.ok) {
-        throw new Error(
-          'Wikidata returned HTTP ' + response.status
-        );
-      }
-
-      const data = await response.json();
-
-      if (data.error) {
-        throw new Error(
-          data.error.info || 'Wikidata API error'
-        );
-      }
-
-      return data.entities || {};
-    } finally {
-      clearTimeout(timeout);
-    }
+  function validId(id) {
+    return /^Q\d+$/.test(String(id || ''));
   }
 
-  function statementValues(entity, property) {
-    const statements = entity?.claims?.[property] || [];
+  function uniqueStrings(values) {
+    if (!Array.isArray(values)) return [];
 
-    const valid = statements.filter(statement => {
-      return (
-        statement.rank !== 'deprecated' &&
-        statement.mainsnak?.snaktype === 'value' &&
-        statement.mainsnak?.datavalue
-      );
-    });
-
-    const preferred = valid.filter(
-      statement => statement.rank === 'preferred'
-    );
-
-    const chosen = preferred.length ? preferred : valid;
-
-    return chosen
-      .map(statement =>
-        statement.mainsnak.datavalue.value
+    return [
+      ...new Set(
+        values
+          .filter(value => typeof value === 'string')
+          .map(value => value.trim())
+          .filter(Boolean)
       )
-      .slice(0, 5);
-  }
-
-  function itemIds(values) {
-    return values
-      .map(value => {
-        if (value?.id && /^Q\d+$/.test(value.id)) {
-          return value.id;
-        }
-
-        if (
-          value?.['entity-type'] === 'item' &&
-          Number.isInteger(value['numeric-id'])
-        ) {
-          return 'Q' + value['numeric-id'];
-        }
-
-        return null;
-      })
-      .filter(Boolean);
-  }
-
-  async function fetchCompanyDetails(id) {
-    if (!/^Q\d+$/.test(id)) {
-      throw new Error('Invalid Wikidata ID.');
-    }
-
-    const entities = await wikidataRequest({
-      ids: id,
-      props: 'claims|labels|descriptions',
-      languages: 'en'
-    });
-
-    const entity = entities[id];
-
-    if (!entity || entity.missing !== undefined) {
-      throw new Error('Wikidata entity not found.');
-    }
-
-    const fields = [
-      {
-        column: 'E',
-        title: 'Company Type',
-        property: 'P31'
-      },
-      {
-        column: 'F',
-        title: 'Company Headquarters',
-        property: 'P159'
-      },
-      {
-        column: 'G',
-        title: 'Industry',
-        property: 'P452'
-      },
-      {
-        column: 'K',
-        title: 'Company Website',
-        property: 'P856'
-      }
     ];
-
-    const raw = {};
-
-    for (const field of fields) {
-      raw[field.property] =
-        statementValues(entity, field.property);
-    }
-
-    const relatedIds = [
-      ...new Set([
-        ...itemIds(raw.P31),
-        ...itemIds(raw.P159),
-        ...itemIds(raw.P452)
-      ])
-    ];
-
-    let related = {};
-
-    if (relatedIds.length) {
-      related = await wikidataRequest({
-        ids: relatedIds.join('|'),
-        props: 'labels',
-        languages: 'en',
-        languagefallback: '1'
-      });
-    }
-
-    return fields.map(field => {
-      const values = raw[field.property];
-
-      let displayValues = [];
-
-      if (field.property === 'P856') {
-        displayValues = values.filter(value => {
-          if (typeof value !== 'string') return false;
-
-          try {
-            const url = new URL(value);
-            return (
-              url.protocol === 'https:' ||
-              url.protocol === 'http:'
-            );
-          } catch {
-            return false;
-          }
-        });
-      } else {
-        displayValues = itemIds(values).map(relatedId => {
-          return (
-            related[relatedId]?.labels?.en?.value ||
-            relatedId
-          );
-        });
-      }
-
-      return {
-        ...field,
-        values: [...new Set(displayValues)],
-        source:
-          'https://www.wikidata.org/wiki/' +
-          id + '#' + field.property
-      };
-    });
   }
 
-  function renderDetails(parent, fields) {
+  function makeField(column, title, values, source) {
+    return {
+      column,
+      title,
+      values: uniqueStrings(values),
+      source
+    };
+  }
+
+  function globalFields(candidate) {
+    const profile = candidate.global_profile || {};
+    const id = String(candidate.wikidata_id || '');
+    const sources = candidate.field_sources || {};
+
+    function source(property, key) {
+      return sources[key] ||
+        'https://www.wikidata.org/wiki/' +
+        id + '#' + property;
+    }
+
+    return [
+      makeField(
+        'E',
+        'Company Type',
+        profile.company_type,
+        source('P31', 'company_type')
+      ),
+      makeField(
+        'F',
+        'Company Headquarters',
+        profile.headquarters,
+        source('P159', 'headquarters')
+      ),
+      makeField(
+        'G',
+        'Industry',
+        profile.industry,
+        source('P452', 'industry')
+      ),
+      makeField(
+        'K',
+        'Company Website',
+        profile.websites,
+        source('P856', 'websites')
+      )
+    ];
+  }
+
+  function renderGlobalDetails(parent, candidate) {
     const section = document.createElement('div');
 
     section.style.marginTop = '14px';
@@ -307,15 +197,19 @@
     addText(
       section,
       'h3',
-      'V7 — Company Details Preview'
+      'V8 — Global Company Background'
     );
 
     addText(
       section,
       'p',
-      'Wikidata-reported values only. ' +
-      'These have not been verified for Malaysia.'
+      'Information reported by Wikidata. ' +
+      'Not independently verified.'
     );
+
+    const profile = candidate.global_profile || {};
+
+    const fields = globalFields(candidate);
 
     fields.forEach(field => {
       const item = document.createElement('div');
@@ -330,11 +224,13 @@
         field.column + ' — ' + field.title
       );
 
-      const value = field.values.length
-        ? field.values.join('; ')
-        : 'Not available from this Wikidata record';
-
-      addText(item, 'p', value);
+      addText(
+        item,
+        'p',
+        field.values.length
+          ? field.values.join('; ')
+          : 'Not available from this source'
+      );
 
       addLink(
         item,
@@ -352,14 +248,235 @@
       section.appendChild(item);
     });
 
+    const extra = [
+      ['Country', profile.country],
+      ['Country of origin', profile.country_of_origin]
+    ];
+
+    extra.forEach(([title, values]) => {
+      const item = document.createElement('div');
+      item.style.padding = '10px 0';
+
+      addText(item, 'strong', title);
+
+      addText(
+        item,
+        'p',
+        uniqueStrings(values).join('; ') ||
+          'Not available from this source'
+      );
+
+      section.appendChild(item);
+    });
+
     addText(
       section,
       'p',
-      'Preview only — columns E, F, G and K ' +
+      'Preview only. Columns E, F, G and K ' +
       'have not been changed.'
     );
 
     parent.appendChild(section);
+  }
+
+  function renderMalaysiaDetails(parent, candidate) {
+    const profile = candidate.malaysia_profile || {};
+
+    const section = document.createElement('div');
+
+    section.style.marginTop = '14px';
+    section.style.padding = '12px';
+    section.style.border = '1px solid #cbd5df';
+    section.style.borderRadius = '8px';
+
+    addText(
+      section,
+      'h3',
+      'Malaysia-Specific Research'
+    );
+
+    addText(
+      section,
+      'p',
+      'This section is separate from the ' +
+      'global company background.'
+    );
+
+    const fields = [
+      [
+        'Malaysia presence',
+        profile.malaysia_presence_status
+      ],
+      [
+        'Malaysia company name',
+        profile.malaysia_company_name
+      ],
+      [
+        'Malaysia headquarters',
+        profile.malaysia_headquarters
+      ],
+      [
+        'Malaysia office address',
+        profile.malaysia_office_address
+      ],
+      [
+        'Malaysia website',
+        profile.malaysia_website
+      ],
+      [
+        'Malaysia careers website',
+        profile.malaysia_careers_url
+      ]
+    ];
+
+    fields.forEach(([title, value]) => {
+      const item = document.createElement('div');
+
+      item.style.padding = '8px 0';
+      item.style.borderBottom =
+        '1px solid #e5e7eb';
+
+      addText(item, 'strong', title);
+
+      addText(
+        item,
+        'p',
+        value || 'Not independently verified'
+      );
+
+      if (
+        typeof value === 'string' &&
+        /^https?:\/\//i.test(value)
+      ) {
+        addLink(item, 'Open source website', value);
+      }
+
+      section.appendChild(item);
+    });
+
+    const evidence = Array.isArray(
+      profile.malaysia_evidence
+    )
+      ? profile.malaysia_evidence
+      : [];
+
+    addText(section, 'h4', 'Malaysia Evidence');
+
+    if (!evidence.length) {
+      addText(
+        section,
+        'p',
+        'No independent Malaysia-specific ' +
+        'evidence available from this research.'
+      );
+    } else {
+      evidence.forEach(item => {
+        const block = document.createElement('div');
+        block.style.padding = '8px 0';
+
+        addText(
+          block,
+          'strong',
+          item.type || 'Research signal'
+        );
+
+        addText(
+          block,
+          'p',
+          item.note ||
+            'This signal is not independent verification.'
+        );
+
+        addLink(
+          block,
+          'View source',
+          item.source_url
+        );
+
+        section.appendChild(block);
+      });
+    }
+
+    addText(
+      section,
+      'p',
+      profile.research_note ||
+      'Verify the Malaysian legal entity, ' +
+      'office and careers website separately.'
+    );
+
+    addText(
+      section,
+      'p',
+      'Malaysia presence verified: ' +
+      (
+        candidate.verified_malaysia_presence === true
+          ? 'Reported verified by source'
+          : 'No'
+      )
+    );
+
+    parent.appendChild(section);
+  }
+
+  function buildNote(company, candidate) {
+    const id = String(candidate.wikidata_id || '');
+    const global = candidate.global_profile || {};
+    const malaysia = candidate.malaysia_profile || {};
+
+    function values(items) {
+      return uniqueStrings(items).join('; ') ||
+        'Not available';
+    }
+
+    return [
+      'UNVERIFIED COMPANY RESEARCH — V8',
+      'Searched company: ' + company,
+      'Candidate: ' + String(candidate.name || ''),
+      'Description: ' +
+        String(candidate.description || ''),
+      'Wikidata ID: ' + id,
+      'Source: https://www.wikidata.org/wiki/' + id,
+      '',
+      'GLOBAL BACKGROUND (UNVERIFIED)',
+      'Company type: ' + values(global.company_type),
+      'Headquarters: ' + values(global.headquarters),
+      'Industry: ' + values(global.industry),
+      'Country: ' + values(global.country),
+      'Websites: ' + values(global.websites),
+      '',
+      'MALAYSIA-SPECIFIC RESEARCH',
+      'Presence: ' +
+        String(
+          malaysia.malaysia_presence_status ||
+          'Not independently verified'
+        ),
+      'Malaysia company name: ' +
+        String(
+          malaysia.malaysia_company_name ||
+          'Not verified'
+        ),
+      'Malaysia office address: ' +
+        String(
+          malaysia.malaysia_office_address ||
+          'Not verified'
+        ),
+      'Malaysia website: ' +
+        String(
+          malaysia.malaysia_website ||
+          'Not verified'
+        ),
+      'Malaysia careers: ' +
+        String(
+          malaysia.malaysia_careers_url ||
+          'Not verified'
+        ),
+      '',
+      'REVIEW REQUIRED',
+      'Global information does not prove ' +
+        'Malaysian office presence.',
+      'Further verification required.'
+    ].join('\n');
   }
 
   async function approveAndSave(
@@ -367,26 +484,24 @@
     row,
     candidate,
     button,
-    message
+    message,
+    token
   ) {
     const id = String(candidate.wikidata_id || '');
 
-    if (!/^Q\d+$/.test(id)) {
-      show('Cannot save: invalid Wikidata ID.');
+    if (!validId(id)) {
+      message.textContent =
+        'Cannot save: invalid Wikidata ID.';
       return;
     }
 
-    const note = [
-      'UNVERIFIED RESEARCH CANDIDATE',
-      'Searched company: ' + company,
-      'Candidate: ' + String(candidate.name || ''),
-      'Description: ' +
-        String(candidate.description || ''),
-      'Wikidata ID: ' + id,
-      'Source: https://www.wikidata.org/entity/' + id,
-      'Malaysia-specific identity NOT verified.',
-      'Further verification required before relying on this data.'
-    ].join('\n');
+    if (token !== requestNumber) {
+      message.textContent =
+        'Research changed. Select again.';
+      return;
+    }
+
+    const note = buildNote(company, candidate);
 
     button.disabled = true;
     button.textContent = 'Checking Excel...';
@@ -405,13 +520,21 @@
 
         await context.sync();
 
+        if (token !== requestNumber) {
+          return {
+            saved: false,
+            reason: 'Research changed. Nothing saved.'
+          };
+        }
+
         const currentCompany =
           String(nameCell.values[0][0] ?? '').trim();
 
         if (currentCompany !== company) {
           return {
             saved: false,
-            reason: 'Company name changed. Research again.'
+            reason:
+              'Company name changed. Research again.'
           };
         }
 
@@ -449,13 +572,13 @@
       }
 
       show(
-        'SAVE COMPLETE\n' +
-        'Saved unverified note to AP' + row + '.\n' +
-        'Columns E, F, G and K unchanged.'
+        'V8 SAVE COMPLETE\n' +
+        'Research note saved to AP' + row + '.\n' +
+        'E, F, G and K remain unchanged.'
       );
 
       message.textContent =
-        'Saved to AP' + row +
+        'Research note saved to AP' + row +
         '. Company details remain preview-only.';
 
       button.textContent = 'Saved to Excel';
@@ -463,7 +586,7 @@
       show('SAVE ERROR\n' + errorText(error));
 
       message.textContent =
-        'Save not confirmed. See error above.';
+        'Save not confirmed: ' + errorText(error);
 
       button.disabled = false;
       button.textContent = 'Approve & save note';
@@ -481,11 +604,7 @@
       'Review research for D' + row
     );
 
-    addText(
-      results,
-      'p',
-      'Searched: ' + company
-    );
+    addText(results, 'p', 'Searched: ' + company);
 
     if (!candidates.length) {
       addText(
@@ -524,18 +643,20 @@
         'small'
       );
 
-      if (/^Q\d+$/.test(id)) {
+      if (validId(id)) {
         addLink(
           card,
           'Open Wikidata source',
-          'https://www.wikidata.org/wiki/' + id
+          candidate.source_url ||
+            'https://www.wikidata.org/wiki/' + id
         );
       }
 
       addText(
         card,
         'p',
-        'Not verified as the correct Malaysian company.',
+        'Candidate identity and Malaysian ' +
+        'operations require verification.',
         'small'
       );
 
@@ -550,14 +671,15 @@
         'small'
       );
 
-      select.addEventListener('click', async () => {
+      select.addEventListener('click', () => {
         if (token !== requestNumber) {
           show('Results outdated. Research again.');
           return;
         }
 
-        if (!/^Q\d+$/.test(id)) {
-          show('Invalid candidate ID.');
+        if (!validId(id)) {
+          message.textContent =
+            'Invalid candidate ID.';
           return;
         }
 
@@ -570,84 +692,40 @@
         message.textContent =
           'Selected: ' +
           String(candidate.name || '') +
-          '. Malaysian identity not verified.';
+          '. Malaysia-specific information ' +
+          'is not independently verified.';
 
         const approve = document.createElement('button');
         approve.type = 'button';
         approve.textContent = 'Approve & save note';
 
         approve.addEventListener('click', async () => {
-          if (token !== requestNumber) {
-            show('Research changed. Select again.');
-            return;
-          }
-
           await approveAndSave(
             company,
             row,
             candidate,
             approve,
-            message
+            message,
+            token
           );
         });
 
         card.appendChild(approve);
 
         const details = document.createElement('div');
-        addText(
-          details,
-          'p',
-          'Loading company details from Wikidata...'
-        );
+
+        renderGlobalDetails(details, candidate);
+        renderMalaysiaDetails(details, candidate);
 
         card.appendChild(details);
 
         show(
-          'V7: Candidate selected.\n' +
-          'Loading details for ' + id + '.\n' +
-          'No Excel cells changed.'
+          'V8 DETAILS READY\n' +
+          'Company: ' + company + '\n' +
+          'Wikidata: ' + id + '\n' +
+          'Global and Malaysia-specific previews ready.\n' +
+          'No company-detail cells changed.'
         );
-
-        try {
-          const fields = await fetchCompanyDetails(id);
-
-          if (token !== requestNumber) return;
-
-          details.replaceChildren();
-          renderDetails(details, fields);
-
-          show(
-            'V7 DETAILS READY\n' +
-            'Company: ' + company + '\n' +
-            'Wikidata: ' + id + '\n' +
-            'Review E, F, G and K below.\n' +
-            'These are unverified preview values.\n' +
-            'No company-detail cells changed.'
-          );
-        } catch (error) {
-          if (token !== requestNumber) return;
-
-          details.replaceChildren();
-
-          addText(
-            details,
-            'p',
-            'Details unavailable: ' + errorText(error)
-          );
-
-          addText(
-            details,
-            'p',
-            'Candidate selection and AP note saving ' +
-            'remain available.'
-          );
-
-          show(
-            'V7 DETAIL LOOKUP ERROR\n' +
-            errorText(error) + '\n' +
-            'No company-detail cells changed.'
-          );
-        }
       });
 
       card.appendChild(select);
@@ -679,7 +757,7 @@
     clearResults();
 
     show(
-      'V7 RESEARCHING\n' +
+      'V8 RESEARCHING\n' +
       'Cell: D' + row + '\n' +
       'Company: ' + company
     );
@@ -713,14 +791,22 @@
 
       if (token !== requestNumber) return;
 
+      if (data.status === 'research_error') {
+        throw new Error(
+          data.message || 'Worker research failed.'
+        );
+      }
+
       const candidates = Array.isArray(data.candidates)
         ? data.candidates
         : [];
 
       show(
-        'V7 RESEARCH COMPLETE\n' +
+        'V8 RESEARCH COMPLETE\n' +
+        'Worker: ' + (data.version || 'unknown') + '\n' +
         'Candidates: ' + candidates.length + '\n' +
-        'Select one to preview company details.'
+        'Select one to review global and ' +
+        'Malaysia-specific information.'
       );
 
       renderCandidates(
@@ -767,10 +853,7 @@
         ++requestNumber;
         clearResults();
 
-        show(
-          'D' + row + ' is blank.'
-        );
-
+        show('D' + row + ' is blank.');
         return;
       }
 
@@ -786,7 +869,7 @@
   async function initialize() {
     if (active) {
       show(
-        'V7 READY\n' +
+        'V8 READY\n' +
         'Monitoring Company Master D7 onward.\n' +
         'Edit D7 to start research.'
       );
@@ -796,7 +879,7 @@
     if (initializing) return;
 
     initializing = true;
-    show('V7: Connecting to Excel...');
+    show('V8: Connecting to Excel...');
 
     try {
       await Office.onReady();
@@ -815,39 +898,4 @@
         await context.sync();
 
         if (sheet.isNullObject) {
-          throw new Error(
-            'Company Master sheet not found.'
-          );
-        }
-
-        sheet.onChanged.add(onChanged);
-        await context.sync();
-      });
-
-      active = true;
-
-      show(
-        'V7 READY — COMPANY DETAILS PREVIEW\n' +
-        'Monitoring Company Master column D, ' +
-        'row 7 onward.\n' +
-        'Edit D7 to research.\n' +
-        'Select a candidate to preview E, F, G, K.\n' +
-        'Company details will NOT be written.\n' +
-        'AP note saving remains approval-only.'
-      );
-    } catch (error) {
-      show(
-        'V7 CONNECTION ERROR\n' +
-        errorText(error)
-      );
-    } finally {
-      initializing = false;
-    }
-  }
-
-  if (retry) {
-    retry.addEventListener('click', initialize);
-  }
-
-  initialize();
-})();
+          throw
