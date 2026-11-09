@@ -5,7 +5,7 @@
   <meta name="viewport"
         content="width=device-width, initial-scale=1">
 
-  <title>Malaysia Company Research V8 Diagnostic</title>
+  <title>Malaysia Company Research V8</title>
 
   <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
 
@@ -111,7 +111,7 @@
 </head>
 
 <body>
-  <h1>Malaysia Company Research — V8 Diagnostic</h1>
+  <h1>Malaysia Company Research — V8</h1>
 
   <p>
     Review-first company research for
@@ -121,15 +121,19 @@
 
   <div class="notice">
     <strong>Safety:</strong>
-    Global company background and Malaysia-specific
-    information are preview-only.
+    Research covers global company background
+    and separate Malaysia-specific information.
 
-    Research is not automatically verified.
+    Search results are not automatically verified.
 
-    Saving a note to AP requires your approval.
+    You must approve before a research note is
+    saved to column AP.
 
-    Existing values, formulas, formatting and
-    company-detail cells will not be overwritten.
+    Existing values and formulas will not be
+    overwritten.
+
+    Company details in columns E, F, G and K
+    remain preview-only.
   </div>
 
   <div id="status" role="status" aria-live="polite">
@@ -142,106 +146,6 @@
 
   <div id="results" aria-live="polite"></div>
 
-  <script>
-    (function () {
-      'use strict';
-
-      const status =
-        document.getElementById('status');
-
-      const loadingMessage =
-        'V8 DIAGNOSTIC\n' +
-        'Error detector active.\n' +
-        'Loading taskpane.js...';
-
-      let errorDetected = false;
-
-      function report(message) {
-        status.textContent = message;
-      }
-
-      window.addEventListener(
-        'error',
-        function (event) {
-          errorDetected = true;
-
-          if (
-            event.target &&
-            event.target.tagName === 'SCRIPT'
-          ) {
-            report(
-              'V8 SCRIPT LOAD ERROR\n' +
-              'The browser could not load:\n' +
-              event.target.src
-            );
-
-            return;
-          }
-
-          report(
-            'V8 JAVASCRIPT ERROR\n' +
-            'Message: ' +
-            (event.message || 'Unknown error') +
-            '\nFile: ' +
-            (event.filename || 'Unknown') +
-            '\nLine: ' +
-            (event.lineno || 'Unknown') +
-            '\nColumn: ' +
-            (event.colno || 'Unknown')
-          );
-        },
-        true
-      );
-
-      window.addEventListener(
-        'unhandledrejection',
-        function (event) {
-          errorDetected = true;
-
-          const reason = event.reason;
-
-          report(
-            'V8 PROMISE ERROR\n' +
-            String(
-              reason && reason.message
-                ? reason.message
-                : reason
-            )
-          );
-        }
-      );
-
-      window.v8ScriptLoaded = function () {
-        if (
-          !errorDetected &&
-          status.textContent === loadingMessage
-        ) {
-          report(
-            'V8 SCRIPT DOWNLOADED\n' +
-            'But initialization did not start.\n' +
-            'Check the beginning and end of ' +
-            'taskpane.js.'
-          );
-        }
-      };
-
-      window.v8ScriptFailed = function () {
-        errorDetected = true;
-
-        report(
-          'V8 SCRIPT LOAD FAILED\n' +
-          'The JavaScript file was not loaded.'
-        );
-      };
-
-      report(loadingMessage);
-    })();
-  </script>
-
-  <script
-    src="taskpane.js?v=8-global-malaysia-diagnostic-1"
-    onload="window.v8ScriptLoaded()"
-    onerror="window.v8ScriptFailed()">
-  </script>
+  <script src="taskpane.js?v=8-fixed-20261110"></script>
 </body>
 </html>
