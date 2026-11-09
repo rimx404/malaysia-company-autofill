@@ -1,56 +1,79 @@
 (() => {
   'use strict';
   const status = document.getElementById('status');
-  const show = (message) => { status.textContent = message; };
-  const detail = (error) => String(error && (error.stack || error.message) || error);
+  const retry = document.getElementById('retry');
+  const show = message => { if (status) status.textContent = message; };
+  const detail = e => String((e && (e.stack || e.message)) || e);
   let active = false;
-  let listener = null;
-  async function initialize() {
-    if (active) { show('Already monitoring Company Master column D.'); return; }
-    show('Diagnostic: JavaScript running.\nOffice global: ' + typeof Office + '\nExcel global: ' + typeof Excel + '\nWaiting for Office.onReady (max 12 seconds)...');
-    if (typeof Office === 'undefined' || typeof Office.onReady !== 'function') {
-      show('ERROR: Office.js did not expose Office.onReady. Check Office.js network access and add-in host.'); return;
-    }
-    let timeout;
+  let handlerResult = null;
+  let initializing = false;
+
+  function rowRangeFromAddress(address) {
+    const local = String(address || '').split('!').pop().replace(/\$/g, '').toUpperCase();
+    const m = /^([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?$/.exec(local);
+    if (!m) return null;
+    const columnNumber = letters => [...letters].reduce((n, c) => n * 26 + c.charCodeAt(0) - 64, 0);
+    const left = columnNumber(m[1]);
+    const right = columnNumber(m[3] || m[1]);
+    if (left > 4 || right < 4) return null;
+    const start = Math.max(7, Number(m[2]));
+    const end = Number(m[4] || m[2]);
+    if (end < start) return null;
+    return { start, end };
+  }
+
+  async function onChanged(event) {
     try {
+      const rows = rowRangeFromAddress(event.address);
+      if (!rows) return;
+      if (rows.end - rows.start > 99) {
+        show('Detected large edit including column D, rows ' + rows.start + '–' + rows.end + '.\nSkipped reading more than 100 rows.\nNo worksheet changes.');
+        return;
+      }
+      await Excel.run(async context => {
+        const sheet = context.workbook.worksheets.getItem('Company Master');
+        const range = sheet.getRange('D' + rows.start + ':D' + rows.end);
+        range.load('values');
+        await context.sync();
+        const entries = range.values.map((v, i) => 'D' + (rows.start + i) + ': ' + String(v[0] == null || v[0] === '' ? '(blank)' : v[0]));
+        show('DETECTED COMPANY NAME EDIT\n' + entries.join('\n') + '\n\nRead-only: no cells changed.');
+      });
+    } catch (error) { show('CHANGE EVENT ERROR:\n' + detail(error)); }
+  }
+
+  async function initialize() {
+    if (active) { show('MONITORING: Company Master, column D, row 7 onward.\nEdit a company name to test.'); return; }
+    if (initializing) return;
+    initializing = true;
+    show('Diagnostics V4: initializing Office connection...');
+    let timer;
+    try {
+      if (typeof Office === 'undefined' || typeof Office.onReady !== 'function') throw new Error('Office.onReady unavailable.');
       const info = await Promise.race([
         Office.onReady(),
-        new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error('Office.onReady timed out after 12 seconds. Excel host did not signal readiness.')), 12000); })
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Office.onReady timed out after 15 seconds.')), 15000); })
       ]);
-      clearTimeout(timeout);
-      show('Office.onReady completed.\nHost: ' + String(info && info.host) + '\nPlatform: ' + String(info && info.platform) + '\nExcel global: ' + typeof Excel);
-      if (!info || info.host !== Office.HostType.Excel) {
-        show('ERROR: Host is not Excel. Host: ' + String(info && info.host)); return;
-      }
-      if (typeof Excel === 'undefined') { show('ERROR: Excel JavaScript API is unavailable in this session.'); return; }
+      clearTimeout(timer);
+      if (!info || info.host !== Office.HostType.Excel) throw new Error('Not running inside Excel. Host: ' + String(info && info.host));
+      if (typeof Excel === 'undefined') throw new Error('Excel JavaScript API unavailable.');
+      show('Excel connected. Registering Company Master change listener...');
       await Excel.run(async context => {
         const sheet = context.workbook.worksheets.getItemOrNullObject('Company Master');
         sheet.load('isNullObject');
         await context.sync();
-        if (sheet.isNullObject) throw new Error('Company Master worksheet not found.');
-        listener = sheet.onChanged.add(async event => {
-          try {
-            const match = /^D(\d+)(?::D\d+)?$/i.exec(event.address.replace(/^.*!/, '').replace(/\$/g, ''));
-            if (!match || Number(match[1]) < 7) return;
-            const row = Number(match[1]);
-            await Excel.run(async ctx => {
-              const ws = ctx.workbook.worksheets.getItem('Company Master');
-              const cell = ws.getRange('D' + row);
-              cell.load('values');
-              await ctx.sync();
-              show('Detected edit at D' + row + '\nCompany: ' + String(cell.values[0][0] || '(blank)') + '\nNo cells were changed by this add-in.');
-            });
-          } catch (error) { show('Event error: ' + detail(error)); }
-        });
+        if (sheet.isNullObject) throw new Error('Worksheet "Company Master" was not found.');
+        handlerResult = sheet.onChanged.add(onChanged);
         await context.sync();
       });
       active = true;
-      show('MONITORING: Company Master, column D, row 7 onward.\nEdit a company name to test.\nRead-only: no worksheet changes.');
+      show('MONITORING: Company Master, column D, row 7 onward.\nChange D7 or D8 to test.\nRead-only: no worksheet changes.');
     } catch (error) {
-      clearTimeout(timeout);
-      show('DIAGNOSTIC ERROR:\n' + detail(error) + '\n\nIf Office.onReady times out, verify the add-in manifest SourceLocation, reload Excel, and test again.');
+      show('DIAGNOSTIC ERROR:\n' + detail(error));
+    } finally {
+      clearTimeout(timer);
+      initializing = false;
     }
   }
-  document.getElementById('retry').addEventListener('click', initialize);
+  if (retry) retry.addEventListener('click', initialize);
   initialize();
 })();
