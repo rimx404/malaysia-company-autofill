@@ -6,7 +6,7 @@
   <meta name="viewport"
         content="width=device-width, initial-scale=1">
 
-  <title>Malaysia Company Research V9.1</title>
+  <title>Malaysia Company Research V10.4</title>
 
   <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
 
@@ -131,7 +131,7 @@
 <body>
 
   <h1>
-    Malaysia Company Research — V9.1
+    Malaysia Company Research — V10.4
   </h1>
 
   <p>
@@ -141,44 +141,63 @@
     column D, row 7 onward.
   </p>
 
-  <div class="notice">
-    <strong>Safety — Malaysia-Only Autofill V9.1:</strong>
+<div class="notice">
+  <strong>Safety — Malaysia-Only Autofill V10.4:</strong>
 
-    Global company information is displayed
-    for reference only.
+  Only one verified Malaysia-specific company
+  record can be selected as the Excel save target.
 
-    Only supported Malaysia-specific company
-    details are proposed for saving.
+  Global company information is displayed for
+  reference only, with one exception:
 
-    You must review and approve before
-    Excel cells are changed.
+  <strong>
+    Columns L, M and N may contain explicitly
+    sourced GLOBAL PARENT metrics.
+  </strong>
 
-    Blank cells in columns E, F, J, K and AP
-    may be filled after approval.
+  These are NOT Malaysia subsidiary revenue
+  or Malaysia employee figures. Their global
+  scope, reporting dates and sources must be
+  clearly documented in the research note
+  and Company Research Audit.
 
-    An existing value in column J is protected.
+  Eligible empty cells in columns E, F, G, I,
+  J, K, L, M, N, O, P, Q, R, S, AF, AG, AH
+  and AI may be filled after approval.
 
-    The exact placeholder
-    <strong>[verify office address]</strong>
-    can be replaced only if you explicitly
-    select the separate checkbox before approval.
+  AP may receive a research note only when
+  the cell is empty.
 
-    Real office addresses, existing manual
-    values and formulas will not be overwritten.
+  <strong>Column J protection:</strong>
+  Existing values and formulas are protected.
+  The exact placeholder
+  <strong>[verify office address]</strong>
+  can be replaced only with your separate
+  explicit checkbox approval.
 
-    Existing cell formatting and column
-    headings remain unchanged.
+  Protected columns A, B, C, D and AE
+  are never autofilled.
 
-    Columns D, G, I, L, M, N, O
-    and AF through AI will not be changed.
+  Columns H, T:AD and AJ:AO remain outside
+  this research operation.
 
-    Visa sponsorship is not automatically verified.
-  </div>
+  Existing manual values, formulas, number
+  formats, headings and AP notes are preserved.
+
+  A full worksheet backup and a separate
+  source-by-source Company Research Audit
+  are created before Company Master values
+  are written.
+
+  Visa sponsorship is not inferred from
+  general Malaysian visa rules. Unsupported
+  information remains blank.
+</div>
 
   <div id="status"
        role="status"
        aria-live="polite">
-    Loading V9.1 JavaScript...
+    Loading V10.4 JavaScript...
   </div>
 
   <button id="retry" type="button">
@@ -189,7 +208,7 @@
        aria-live="polite">
   </div>
 
-  <script src="taskpane.js?v=9-1-office-address-20261110"></script>
+  <script src="taskpane.js?v=10.4"></script>
 
 </body>
 </html>
