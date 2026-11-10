@@ -841,8 +841,6 @@
         'small'
       );
 
-      );
-
       item.approveButton = approve;
       item.approvalMessage = message;
 
