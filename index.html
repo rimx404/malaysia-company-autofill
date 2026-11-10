@@ -6,7 +6,7 @@
   <meta name="viewport"
         content="width=device-width, initial-scale=1">
 
-  <title>Malaysia Company Research V9</title>
+  <title>Malaysia Company Research V9.1</title>
 
   <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
 
@@ -36,6 +36,11 @@
 
     h3 {
       font-size: 17px;
+      margin-bottom: 8px;
+    }
+
+    h4 {
+      font-size: 15px;
       margin-bottom: 8px;
     }
 
@@ -106,7 +111,19 @@
       border-radius: 8px;
       padding: 12px;
       font-size: 13px;
-      line-height: 1.5;
+      line-height: 1.6;
+    }
+
+    input[type="checkbox"] {
+      width: 18px;
+      height: 18px;
+      accent-color: #16865d;
+      vertical-align: middle;
+    }
+
+    label {
+      line-height: 1.6;
+      cursor: pointer;
     }
   </style>
 </head>
@@ -114,7 +131,7 @@
 <body>
 
   <h1>
-    Malaysia Company Research — V9
+    Malaysia Company Research — V9.1
   </h1>
 
   <p>
@@ -125,25 +142,35 @@
   </p>
 
   <div class="notice">
-    <strong>Safety — Malaysia-Only Autofill:</strong>
+    <strong>Safety — Malaysia-Only Autofill V9.1:</strong>
 
-    Global company information is shown for
-    reference only.
+    Global company information is displayed
+    for reference only.
 
-    Only supported Malaysia-specific details
-    are proposed for saving.
+    Only supported Malaysia-specific company
+    details are proposed for saving.
 
     You must review and approve before
     Excel cells are changed.
 
-    Only empty cells in columns E, F, K
-    and AP may be filled.
+    Blank cells in columns E, F, J, K and AP
+    may be filled after approval.
 
-    Existing values, formulas, formatting
-    and column headings are protected.
+    An existing value in column J is protected.
 
-    Columns G, L, M, N, O and AF to AI
-    will not be changed by V9.
+    The exact placeholder
+    <strong>[verify office address]</strong>
+    can be replaced only if you explicitly
+    select the separate checkbox before approval.
+
+    Real office addresses, existing manual
+    values and formulas will not be overwritten.
+
+    Existing cell formatting and column
+    headings remain unchanged.
+
+    Columns D, G, I, L, M, N, O
+    and AF through AI will not be changed.
 
     Visa sponsorship is not automatically verified.
   </div>
@@ -151,7 +178,7 @@
   <div id="status"
        role="status"
        aria-live="polite">
-    Loading V9 JavaScript...
+    Loading V9.1 JavaScript...
   </div>
 
   <button id="retry" type="button">
@@ -162,7 +189,7 @@
        aria-live="polite">
   </div>
 
-  <script src="taskpane.js?v=9-malaysia-autofill-20261110"></script>
+  <script src="taskpane.js?v=9-1-office-address-20261110"></script>
 
 </body>
 </html>
