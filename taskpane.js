@@ -1,11 +1,11 @@
 (() => {
   'use strict';
 
-  // Malaysia Company Research task pane V10.4.
-  // Batch-researches all nonblank Company Master rows, then presents one review
-  // and one approval. A full Company Master snapshot is created before writes.
-  // Only Worker-designated Malaysia-local records can be saved. L/M/N are the
-  // sole global-parent-metric exception and are explicitly labelled as GLOBAL.
+  // Malaysia Company Research task pane V10.4 — individual company approval.
+  // Researches all nonblank Company Master rows, then presents a separate review
+  // and approval button for each company. Each approval writes only that row.
+  // A separate Company Master worksheet backup and audit entries are created
+  // for each company approval. L/M/N are the only GLOBAL PARENT metric exception.
 
   const VERSION = '10.4';
   const WORKER_VERSION = '10.3';
@@ -16,7 +16,6 @@
   const HEADER_ROW = 6;
   const FIRST_ROW = 7;
   const NOTE_COLUMN = 'AP';
-  const BACKUP_PREFIX = 'CMBackup104_';
   const AUDIT_SHEET = 'Company Research Audit';
   const PLACEHOLDER = '[verify office address]';
 
@@ -495,7 +494,7 @@
     addText(
       section,
       'p',
-      'One consolidated review covers all selected columns. Only eligible empty cells can be filled; existing values and formulas are preserved.'
+      'This company’s review covers all selected columns. Only eligible empty cells can be filled after this company’s individual approval; existing values and formulas are preserved.'
     );
 
     const rows = Array.isArray(candidate.column_research)
@@ -533,7 +532,7 @@
         if (proposed.source_url) addLink(block, 'Open source', proposed.source_url);
 
         if (isEmpty) {
-          addText(block, 'p', 'Action: eligible to fill after the single batch approval.', 'small');
+          addText(block, 'p', 'Action: eligible to fill after this company’s individual approval.', 'small');
         } else if (exactPlaceholder) {
           addText(block, 'p', 'Action: exact placeholder only; requires the separate row-specific checkbox below.', 'small');
         } else {
@@ -559,6 +558,7 @@
         if (item.notes) addText(block, 'p', item.notes, 'small');
         if (item.source_url) addLink(block, 'Open source', item.source_url);
         if (!isEmpty) {
+
           addText(block, 'p', 'Current Excel value: ' + displayValue(currentValue) + ' — preserved.', 'small');
         }
       }
@@ -662,70 +662,142 @@
     }
   }
 
+  function canWriteCompanyItem(state, item) {
+    if (!state || !item?.target || item.saved || item.completed || item.uncertain) {
+      return false;
+    }
+
+    const rowValues = state.snapshot.values[item.row - 1] || [];
+    const rowFormulas = state.snapshot.formulas[item.row - 1] || [];
+    const permission = state.placeholderPermissions.get(item.row)?.checked === true;
+
+    for (const column of Object.keys(item.proposal.proposed)) {
+      const index = columnNumber(column) - 1;
+      const value = rowValues[index];
+      const formula = rowFormulas[index];
+      const hasFormula = typeof formula === 'string' && formula.startsWith('=');
+      const empty = (value === null || value === undefined || value === '') && !hasFormula;
+      if (empty) return true;
+
+      if (column === 'J' && permission && value === PLACEHOLDER && !hasFormula) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function updateIndividualApprovalStatus(state) {
+    const saved = state.items.filter(item => item.saved).length;
+    const pending = state.items.filter(item =>
+      item.target && !item.saved && !item.completed && !item.uncertain
+    ).length;
+    const errors = state.items.filter(item => item.error).length;
+    const uncertain = state.items.filter(item => item.uncertain).length;
+    const reResearch = state.items.filter(item => item.requiresResearch).length;
+
+    show(
+      'V10.4 INDIVIDUAL APPROVAL REVIEW\n' +
+      'Companies researched: ' + state.snapshot.companies.length +
+      '\nSaved individually: ' + saved +
+      '\nAwaiting individual approval: ' + pending +
+      '\nResearch errors: ' + errors +
+      '\nCompanies requiring fresh research: ' + reResearch +
+      '\nSave results requiring workbook inspection: ' + uncertain +
+      '\nEach company has its own approval, backup and audit entries. No bulk approval is available.'
+    );
+  }
+
   function renderBatchReview(state) {
     clearResults();
     if (!results) return;
 
-    const { items, snapshot, token } = state;
-    addText(results, 'h2', 'Consolidated Company Master review');
+    const { items, snapshot } = state;
+    addText(results, 'h2', 'Company-by-company review');
     addText(results, 'p', 'Worker version: ' + WORKER_VERSION);
     addText(results, 'p', 'Company rows researched: ' + snapshot.companies.length);
-    addText(results, 'p', 'No Excel cells have been changed. Review every row below before the single approval.');
-    addText(results, 'p', 'AP notes and all existing number formats will be preserved. New research history goes to Company Research Audit.');
-
-    let targetCount = 0;
-    let proposalCount = 0;
+    addText(
+      results,
+      'p',
+      'Research is performed together for convenience, but each company must be approved and saved separately. Approving one company never saves another.'
+    );
+    addText(
+      results,
+      'p',
+      'Each individual approval creates its own Company Master worksheet backup and its own source-by-source Company Research Audit entries.'
+    );
 
     items.forEach(item => {
       const card = panel(results, 'D' + item.row + ' — ' + item.company);
+
       if (item.error) {
         addText(card, 'p', 'Research failed: ' + item.error);
-        addText(card, 'p', 'No Excel changes will be made for this row.');
+        addText(card, 'p', 'No Excel changes have been made for this company.');
         return;
       }
 
       if (!item.target) {
         addText(card, 'p', 'No unique verified Malaysia save candidate was returned.');
-        addText(card, 'p', 'Any global or search candidates are reference-only and cannot be written to Excel.');
+        addText(card, 'p', 'Global and other search candidates are reference-only and cannot be saved.');
         const refs = Array.isArray(item.data?.candidates) ? item.data.candidates : [];
         refs.slice(0, 3).forEach(candidate => {
-          addText(card, 'p', String(candidate.name || 'Unnamed candidate') + ' — ' + String(candidate.display_label || 'Reference only'));
+          addText(
+            card,
+            'p',
+            String(candidate.name || 'Unnamed candidate') + ' — ' +
+            String(candidate.display_label || 'Reference only')
+          );
           if (candidate.source_url) addLink(card, 'Open reference source', candidate.source_url);
         });
         return;
       }
 
-      targetCount++;
-      proposalCount += Object.keys(item.proposal.proposed).length;
       addText(card, 'p', 'Malaysia save candidate: ' + item.target.name);
       addText(card, 'p', 'Malaysia record ID: ' + item.target.candidate_id, 'small');
-      addText(card, 'p', 'Global parent: ' + String(item.target.global_parent_name || 'Not supplied') + ' — reference only.', 'small');
+      addText(
+        card,
+        'p',
+        'Global parent: ' + String(item.target.global_parent_name || 'Not supplied') +
+        ' — reference only, except for the explicitly labelled L/M/N metrics.',
+        'small'
+      );
 
       renderGlobalProfile(card, item.target);
       renderMalaysiaProfile(card, item.target);
       renderColumnPreview(card, item.target, item.proposal, item.row, snapshot);
 
       const rowValues = snapshot.values[item.row - 1] || [];
-      const rowFormulas = snapshot.formulas[item.row - 1] || [];
       const apValue = rowValues[columnNumber(NOTE_COLUMN) - 1];
       if (apValue !== null && apValue !== undefined && apValue !== '') {
-        addText(card, 'p', 'AP' + item.row + ' already contains a note. It will be preserved; the new research note will not replace it.', 'small');
+        addText(
+          card,
+          'p',
+          'AP' + item.row + ' already contains a note. It will be preserved; the new research note will not replace it.',
+          'small'
+        );
       } else {
-        addText(card, 'p', 'AP' + item.row + ' is empty; an optional note can be added without replacing existing information.', 'small');
+        addText(
+          card,
+          'p',
+          'AP' + item.row + ' is empty. A research note may be added as part of this company’s individual approval.',
+          'small'
+        );
       }
 
       const jProposal = item.proposal.proposed.J;
       const jValue = rowValues[columnNumber('J') - 1];
-      const jFormula = rowFormulas[columnNumber('J') - 1];
+      const jFormula = (snapshot.formulas[item.row - 1] || [])[columnNumber('J') - 1];
       const jHasFormula = typeof jFormula === 'string' && jFormula.startsWith('=');
+
       if (jProposal && jValue === PLACEHOLDER && !jHasFormula) {
         const label = document.createElement('label');
         label.style.display = 'block';
         label.style.padding = '10px 0';
+
         const checkbox = document.createElement('input');
         checkbox.type = 'checkbox';
         checkbox.checked = false;
         checkbox.style.marginRight = '8px';
+
         label.appendChild(checkbox);
         label.appendChild(document.createTextNode(
           'Allow replacing only the exact text ' + PLACEHOLDER +
@@ -734,49 +806,64 @@
         card.appendChild(label);
         state.placeholderPermissions.set(item.row, checkbox);
       }
+
+      const approval = document.createElement('div');
+      approval.style.marginTop = '14px';
+      approval.style.paddingTop = '12px';
+      approval.style.borderTop = '1px solid #cbd5df';
+      addText(approval, 'strong', 'Individual approval — ' + item.company);
+      addText(
+        approval,
+        'p',
+        'This button saves only ' + item.company + ' in Company Master row ' + item.row +
+        '. It will not save or approve any other company.'
+      );
+
+      const approve = document.createElement('button');
+      approve.type = 'button';
+      approve.textContent = 'Approve & save ' + item.company;
+      approve.disabled = !canWriteCompanyItem(state, item);
+      approve.style.display = 'block';
+      approve.style.width = '100%';
+      approve.style.padding = '13px';
+      approve.style.border = '0';
+      approve.style.borderRadius = '6px';
+      approve.style.background = approve.disabled ? '#9ca3af' : '#137f5b';
+      approve.style.color = '#ffffff';
+      approve.style.fontWeight = '600';
+
+      const message = addText(
+        approval,
+        'p',
+        approve.disabled
+          ? 'No eligible empty fields are available yet. If J contains the exact placeholder, select its checkbox to enable approval.'
+          : 'Ready for this company’s individual approval.',
+        'small'
+      );
+
+      );
+
+      item.approveButton = approve;
+      item.approvalMessage = message;
+
+      approve.addEventListener('click', () => saveCompany(state, item, approve, message));
+
+      const placeholderCheckbox = state.placeholderPermissions.get(item.row);
+      if (placeholderCheckbox) {
+        placeholderCheckbox.addEventListener('change', () => {
+          if (item.saved || item.completed || item.uncertain || item.saving) return;
+          approve.disabled = !canWriteCompanyItem(state, item);
+          message.textContent = approve.disabled
+            ? 'Select the exact-placeholder checkbox only if you want to replace that placeholder.'
+            : 'Ready for this company’s individual approval.';
+        });
+      }
+
+      approval.appendChild(approve);
+      card.appendChild(approval);
     });
 
-    const approval = panel(results, 'One consolidated approval');
-    addText(
-      approval,
-      'p',
-      'Approval first copies the whole Company Master worksheet, then writes a source-by-source record to Company Research Audit. Only after both succeed are eligible Company Master cells filled.'
-    );
-    addText(
-      approval,
-      'p',
-      'Existing values and formulas are skipped. Only the exact J placeholder can be replaced, and only when its row-specific checkbox is selected.'
-    );
-    addText(
-      approval,
-      'p',
-      'L, M and N are the only global-parent exception. They remain numeric with their original Excel formatting. Their GLOBAL PARENT scope, reporting dates and sources are recorded in Company Research Audit.'
-    );
-
-    const approve = document.createElement('button');
-    approve.type = 'button';
-    approve.textContent = 'Approve & save all eligible fields';
-    approve.disabled = targetCount === 0 || proposalCount === 0;
-    approve.style.display = 'block';
-    approve.style.width = '100%';
-    approve.style.padding = '13px';
-    approve.style.border = '0';
-    approve.style.borderRadius = '6px';
-    approve.style.background = approve.disabled ? '#9ca3af' : '#137f5b';
-    approve.style.color = '#ffffff';
-    approve.style.fontWeight = '600';
-    approval.appendChild(approve);
-
-    const message = addText(approval, 'p', '', 'small');
-    if (approve.disabled) {
-      message.textContent = 'Approval unavailable: no verified Malaysia save target with supported fields was returned.';
-    } else {
-      message.textContent =
-        'Verified Malaysia save targets: ' + targetCount +
-        '. Supported field proposals: ' + proposalCount +
-        '. The workbook remains unchanged until you press this button.';
-      approve.addEventListener('click', () => saveBatch(state, approve, message));
-    }
+    updateIndividualApprovalStatus(state);
   }
 
   async function researchAllCompanies() {
@@ -790,7 +877,7 @@
     }
 
     try {
-      show('V10.4 BATCH RESEARCH\nReading Company Master rows…\nExcel has not been changed.');
+      show('V10.4 RESEARCH ALL COMPANIES\nReading Company Master rows…\nExcel has not been changed.');
       const snapshot = await readCompanyMasterSnapshot();
       if (token !== requestNumber) return;
 
@@ -804,10 +891,10 @@
         if (token !== requestNumber) return;
         const companyRow = snapshot.companies[i];
         show(
-          'V10.4 BATCH RESEARCH\n' +
+          'V10.4 RESEARCH ALL COMPANIES\n' +
           'Company ' + (i + 1) + ' of ' + snapshot.companies.length +
           '\nD' + companyRow.row + ': ' + companyRow.company +
-          '\nResearching all selected columns. Excel has not been changed.'
+          '\nResearching this company. Excel has not been changed.'
         );
 
         try {
@@ -819,7 +906,12 @@
             company: companyRow.company,
             data,
             target,
-            proposal: target ? proposedValues(target) : { proposed: {}, audit: [] }
+            proposal: target ? proposedValues(target) : { proposed: {}, audit: [] },
+            saved: false,
+            completed: false,
+            saving: false,
+            uncertain: false,
+            requiresResearch: false
           });
         } catch (error) {
           items.push({ row: companyRow.row, company: companyRow.company, error: errorText(error) });
@@ -838,11 +930,11 @@
       const targets = items.filter(item => item.target).length;
       const failed = items.filter(item => item.error).length;
       show(
-        'V10.4 CONSOLIDATED REVIEW READY\n' +
+        'V10.4 INDIVIDUAL APPROVAL REVIEW READY\n' +
         'Company rows: ' + snapshot.companies.length +
         '\nVerified Malaysia save targets: ' + targets +
         '\nResearch errors: ' + failed +
-        '\nReview all rows, then use the single approval button. Excel has not been changed.'
+        '\nEach company has its own approval button. Excel has not been changed.'
       );
     } catch (error) {
       if (token === requestNumber) {
@@ -881,14 +973,30 @@
     return a === b || (a == null && b == null);
   }
 
-  async function saveBatch(state, button, message) {
+  async function saveCompany(state, item, button, message) {
     if (!state || state.token !== requestNumber || state !== activeBatch) {
-      message.textContent = 'Review expired. Nothing saved; run research again.';
+      message.textContent = 'This review has expired. Nothing was saved; research again.';
+      return;
+    }
+    if (!item || item.saved || item.completed || item.uncertain || item.saving) {
+      message.textContent = 'This company is already saved, completed, or awaiting workbook inspection.';
+      return;
+    }
+    if (!item.target || !validMalaysiaSaveTarget(item.target, item.data)) {
+      message.textContent = 'The Malaysia save candidate did not pass validation. Nothing was saved.';
+      return;
+    }
+    if (!canWriteCompanyItem(state, item)) {
+      message.textContent = 'No eligible empty fields are available for this company. Nothing was saved.';
+      button.disabled = true;
       return;
     }
 
+    item.saving = true;
     button.disabled = true;
-    button.textContent = 'Checking source cells, audit and backup…';
+    button.textContent = 'Saving ' + item.company + ' only…';
+    message.textContent = 'Creating this company’s backup and audit. Other company rows will not be written.';
+
     let backupNameConfirmed = null;
     let auditPrepared = false;
 
@@ -896,177 +1004,219 @@
       const outcome = await Excel.run(async context => {
         const sheets = context.workbook.worksheets;
         const source = sheets.getItem(SHEET);
+
         const used = source.getUsedRangeOrNullObject(true);
         used.load('isNullObject,rowIndex,rowCount');
         await context.sync();
 
-        const currentLastRow = used.isNullObject ? HEADER_ROW :
-          Math.max(HEADER_ROW, used.rowIndex + used.rowCount);
+        const currentLastRow = used.isNullObject
+          ? HEADER_ROW
+          : Math.max(HEADER_ROW, used.rowIndex + used.rowCount);
         const lastRow = Math.max(state.snapshot.lastRow, currentLastRow);
         const current = source.getRange('A1:AP' + lastRow);
         current.load('values,formulas');
         await context.sync();
 
         if (state.token !== requestNumber || state !== activeBatch) {
-          return { blocked: 'Research changed before approval.' };
+          return { blocked: 'The review expired before approval. Research again.' };
         }
 
-        // A batch is invalidated if its company list changes after review.
-        const expectedNames = new Map(state.snapshot.companies.map(x => [x.row, x.company]));
-        for (let row = FIRST_ROW; row <= lastRow; row++) {
-          const expected = expectedNames.get(row) || '';
-          if (currentRowCompany(current.values, row) !== expected) {
-            return { blocked: 'Company name at D' + row + ' changed. Research again.' };
-          }
+        const row = item.row;
+        const currentCompany = currentRowCompany(current.values, row);
+        if (currentCompany !== item.company) {
+          return {
+            blocked: 'Company name in D' + row + ' changed after research. Research this row again.'
+          };
         }
 
-        const headers = new Map();
-        for (const item of state.items) {
-          if (!item.target) continue;
-          if (!validMalaysiaSaveTarget(item.target, item.data)) {
-            return { blocked: 'Malaysia record validation failed at row ' + item.row };
-          }
-          for (const [column, proposal] of Object.entries(item.proposal.proposed)) {
-            const expected = proposal.header || item.data.column_headers?.[column] || '';
-            if (headers.has(column) && headers.get(column) !== expected) {
-              return { blocked: 'Contradictory column header data for ' + column };
-            }
-            headers.set(column, expected);
-          }
+        if (!validMalaysiaSaveTarget(item.target, item.data)) {
+          return { blocked: 'Malaysia record validation failed for row ' + row + '.' };
         }
-        for (const [column, expected] of headers) {
+
+        // Validate only this company's proposed headers.
+        for (const [column, proposal] of Object.entries(item.proposal.proposed)) {
+          const expected = proposal.header || item.data.column_headers?.[column] || '';
           const actual = current.values[HEADER_ROW - 1]?.[columnNumber(column) - 1];
           if (!expected || !headerMatches(actual, expected, column)) {
-            return { blocked: 'Header mismatch at ' + column + HEADER_ROW + '. Nothing written.' };
+            return {
+              blocked: 'Header mismatch at ' + column + HEADER_ROW +
+                '. No cells were written for ' + item.company + '.'
+            };
           }
         }
 
-        // Never approve stale field values or formulas, even for cells that
-        // have become filled since the preview.
+        // Recheck only this company's row. Other companies' rows are not part
+        // of this approval and cannot be included in its write list.
         const fieldsToCheck = new Set([...WRITABLE_COLUMNS, NOTE_COLUMN]);
-        for (const item of state.items.filter(x => x.target)) {
-          for (const column of fieldsToCheck) {
-            const idx = columnNumber(column) - 1;
-            if (!sameCell(current.values[item.row - 1]?.[idx],
-                state.snapshot.values[item.row - 1]?.[idx]) ||
-                !sameCell(current.formulas[item.row - 1]?.[idx],
-                state.snapshot.formulas[item.row - 1]?.[idx])) {
-              return {
-                blocked: column + item.row + ' changed after preview. Research again; nothing saved.'
-              };
-            }
+        for (const column of fieldsToCheck) {
+          const index = columnNumber(column) - 1;
+          if (!sameCell(
+                current.values[row - 1]?.[index],
+                state.snapshot.values[row - 1]?.[index]
+              ) ||
+              !sameCell(
+                current.formulas[row - 1]?.[index],
+                state.snapshot.formulas[row - 1]?.[index]
+              )) {
+            return {
+              blocked: column + row +
+                ' changed after preview. Research this company again; nothing was written.'
+            };
           }
         }
 
-        // Validate the audit sheet before creating any changes.
+        // Check the audit worksheet. An existing but empty audit sheet gets
+        // its header row; a non-empty sheet must have the exact expected schema.
         const auditExisting = sheets.getItemOrNullObject(AUDIT_SHEET);
         auditExisting.load('isNullObject');
         await context.sync();
+
         let auditNextRow = 2;
+        let writeAuditHeaders = auditExisting.isNullObject;
+
         if (!auditExisting.isNullObject) {
           const auditUsed = auditExisting.getUsedRangeOrNullObject(true);
           auditUsed.load('isNullObject,rowIndex,rowCount');
-          const first = auditExisting.getRange('A1:P1');
-          first.load('values,formulas');
           await context.sync();
-          if (!auditUsed.isNullObject) {
-            if (!AUDIT_HEADERS.every((h, i) => first.values[0][i] === h &&
-                !(typeof first.formulas[0][i] === 'string' && first.formulas[0][i].startsWith('=')))) {
-              return { blocked: 'Existing "Company Research Audit" has different headers. No changes made.' };
+
+          if (auditUsed.isNullObject) {
+            writeAuditHeaders = true;
+            auditNextRow = 2;
+          } else {
+            const first = auditExisting.getRange('A1:P1');
+            first.load('values,formulas');
+            await context.sync();
+
+            const validHeaders = AUDIT_HEADERS.every((header, index) =>
+              first.values[0][index] === header &&
+              !(typeof first.formulas[0][index] === 'string' &&
+                first.formulas[0][index].startsWith('='))
+            );
+
+            if (!validHeaders) {
+              return {
+                blocked: 'Existing "' + AUDIT_SHEET +
+                  '" has different headers. No Company Master cells were written.'
+              };
             }
-            auditNextRow = Math.max(2, auditUsed.rowIndex + auditUsed.rowCount + 1);
+
+            auditNextRow = Math.max(
+              2,
+              auditUsed.rowIndex + auditUsed.rowCount + 1
+            );
           }
         }
+
+        const now = new Date().toISOString();
+        const runId = 'V104-' + now.replace(/[^0-9]/g, '') + '-R' + row;
+        const rowValues = current.values[row - 1] || [];
+        const rowFormulas = current.formulas[row - 1] || [];
+        const research = new Map(
+          (item.target.column_research || []).map(value => [value.column, value])
+        );
+        const permission = state.placeholderPermissions.get(row)?.checked === true;
 
         const writes = [];
         const skipped = [];
         const auditRecords = [];
-        const now = new Date().toISOString();
-        const runId = 'V104-' + now.replace(/[^0-9]/g, '') + '-' +
-          Math.random().toString(36).slice(2, 7);
 
-        for (const item of state.items.filter(x => x.target)) {
-          const row = item.row;
-          const values = current.values[row - 1] || [];
-          const formulas = current.formulas[row - 1] || [];
-          const research = new Map((item.target.column_research || []).map(x => [x.column, x]));
-          const permission = state.placeholderPermissions.get(row)?.checked === true;
+        for (const column of SELECTED_COLUMNS) {
 
-          for (const column of SELECTED_COLUMNS) {
-            const idx = columnNumber(column) - 1;
-            const oldValue = values[idx];
-            const oldFormula = formulas[idx];
-            const hasFormula = typeof oldFormula === 'string' && oldFormula.startsWith('=');
-            const empty = (oldValue == null || oldValue === '') && !hasFormula;
-            const exactPlaceholder = column === 'J' && permission &&
-              !hasFormula && oldValue === PLACEHOLDER;
-            const proposed = item.proposal.proposed[column];
-            const raw = research.get(column) || {};
-            let disposition;
+          const index = columnNumber(column) - 1;
+          const oldValue = rowValues[index];
+          const oldFormula = rowFormulas[index];
+          const hasFormula = typeof oldFormula === 'string' && oldFormula.startsWith('=');
+          const empty = (oldValue === null || oldValue === undefined || oldValue === '') &&
+            !hasFormula;
+          const exactPlaceholder = column === 'J' && permission &&
+            !hasFormula && oldValue === PLACEHOLDER;
+          const proposed = item.proposal.proposed[column];
+          const raw = research.get(column) || {};
+          let disposition;
 
-            if (!proposed) {
-              disposition = 'NOT_PROPOSED';
-            } else if (!empty && !exactPlaceholder) {
-              disposition = 'SKIPPED_EXISTING';
-              skipped.push(column + row);
-            } else {
-              disposition = 'PREPARED_NOT_CONFIRMED';
-              writes.push({ row, column, value: proposed.value });
-            }
-
-            auditRecords.push({
+          if (!proposed) {
+            disposition = 'NOT_PROPOSED';
+          } else if (!empty && !exactPlaceholder) {
+            disposition = 'SKIPPED_EXISTING';
+            skipped.push(column + row);
+          } else {
+            disposition = 'PREPARED_NOT_CONFIRMED';
+            writes.push({
               row,
               column,
-              disposition,
-              cells: [
-                runId, now, row, item.company, item.target.candidate_id,
-                item.target.global_parent_wikidata_id, column,
-                hasFormula ? '[EXISTING FORMULA PROTECTED]' : (oldValue ?? ''),
-                proposed ? proposed.value : (raw.value ?? ''),
-                disposition, proposed?.scope || raw.scope || '',
-                proposed?.status || raw.status || '',
-                proposed?.source_url || raw.source_url || '',
-                proposed?.notes || raw.notes || '',
-                '', raw.header || proposed?.header || ''
-              ].map(excelSafe)
+              value: proposed.value
             });
           }
 
-          // Preserve existing AP, including notes and formulas. An empty AP
-          // may receive a plain research summary, while the new audit always
-          // contains separate per-column source entries.
-          const apIndex = columnNumber(NOTE_COLUMN) - 1;
-          const apOld = values[apIndex];
-          const apFormula = formulas[apIndex];
-          const apEmpty = (apOld == null || apOld === '') &&
-            !(typeof apFormula === 'string' && apFormula.startsWith('='));
-          if (apEmpty) {
-            writes.push({
-              row, column: NOTE_COLUMN,
-              value: buildResearchNote(item.company, item.target,
-                item.proposal.proposed, item.proposal.audit)
-            });
-          } else {
-            skipped.push(NOTE_COLUMN + row);
-          }
+          auditRecords.push({
+            disposition,
+            cells: [
+              runId,
+              now,
+              row,
+              item.company,
+              item.target.candidate_id,
+              item.target.global_parent_wikidata_id,
+              column,
+              hasFormula ? '[EXISTING FORMULA PROTECTED]' : (oldValue ?? ''),
+              proposed ? proposed.value : (raw.value ?? ''),
+              disposition,
+              proposed?.scope || raw.scope || '',
+              proposed?.status || raw.status || '',
+              proposed?.source_url || raw.source_url || '',
+              proposed?.notes || raw.notes || '',
+              '',
+              raw.header || proposed?.header || ''
+            ].map(excelSafe)
+          });
+        }
+
+        // AP is an optional summary only. Existing AP notes and formulas are
+        // always preserved. Detailed source records are stored in the audit.
+        const apIndex = columnNumber(NOTE_COLUMN) - 1;
+        const apOld = rowValues[apIndex];
+        const apFormula = rowFormulas[apIndex];
+        const apEmpty = (apOld === null || apOld === undefined || apOld === '') &&
+          !(typeof apFormula === 'string' && apFormula.startsWith('='));
+
+        if (apEmpty) {
+          writes.push({
+            row,
+            column: NOTE_COLUMN,
+            value: buildResearchNote(
+              item.company,
+              item.target,
+              item.proposal.proposed,
+              item.proposal.audit
+            )
+          });
+        } else {
+          skipped.push(NOTE_COLUMN + row);
         }
 
         if (auditRecords.length > 30000) {
-          return { blocked: 'Audit would exceed safe batch size. Use fewer company rows.' };
+          return { blocked: 'Audit would exceed the safe batch size. Nothing was written.' };
         }
+
         if (!writes.length) {
           return { noChanges: true, skipped };
         }
 
-        // Use Worksheet.copy so the entire original worksheet, not only a
-        // rectangular range, is backed up (tables, formulas and formatting).
+        // One worksheet backup for THIS company's approval only.
         const stamp = now.replace(/\D/g, '').slice(0, 17);
-        const backupName = BACKUP_PREFIX + stamp;
+        const backupName = 'CM104_' + row + '_' + stamp;
+        if (backupName.length > 31) {
+          return { blocked: 'Could not create a valid backup worksheet name. Nothing was written.' };
+        }
+
         const collision = sheets.getItemOrNullObject(backupName);
         collision.load('isNullObject');
         await context.sync();
+
         if (!collision.isNullObject) {
-          return { blocked: 'Backup name already exists; retry later. Nothing written.' };
+          return {
+            blocked: 'This company’s backup name already exists. Nothing was written; run research again.'
+          };
         }
 
         const backup = source.copy(Excel.WorksheetPositionType.after, source);
@@ -1074,80 +1224,119 @@
         await context.sync();
         backupNameConfirmed = backupName;
 
-        // Audit must be committed successfully before touching Company Master.
+        // Create/append only this company's audit rows before Master writes.
         const audit = auditExisting.isNullObject
           ? sheets.add(AUDIT_SHEET)
           : sheets.getItem(AUDIT_SHEET);
-        if (auditExisting.isNullObject) {
+
+        if (writeAuditHeaders) {
           audit.getRange('A1:P1').values = [AUDIT_HEADERS];
         }
-        if (auditRecords.length) {
-          audit.getRange('A' + auditNextRow + ':P' +
-            (auditNextRow + auditRecords.length - 1)).values =
-            auditRecords.map(r => r.cells);
-        }
+
+        const lastAuditRow = auditNextRow + auditRecords.length - 1;
+        audit.getRange('A' + auditNextRow + ':P' + lastAuditRow).values =
+          auditRecords.map(record => record.cells);
+
         await context.sync();
         auditPrepared = true;
 
-        // Only values change in the Company Master; never numberFormat,
-        // formatting, formulas, headers or other existing data.
+        // Critical isolation: every write below uses this one approved row.
+        // No loop over the other researched companies exists in this function.
         for (const write of writes) {
+          if (write.row !== row) {
+            throw new Error('Safety check failed: attempted write outside approved company row.');
+          }
           source.getRange(write.column + write.row).values =
             [[excelSafe(write.value)]];
         }
         await context.sync();
 
-        // Mark outcomes confirmed only after the Company Master write sync.
-        // Batch the two audit columns to avoid thousands of cell-by-cell calls.
         const savedAt = new Date().toISOString();
-        const lastAuditRow = auditNextRow + auditRecords.length - 1;
         audit.getRange('J' + auditNextRow + ':J' + lastAuditRow).values =
-          auditRecords.map(r => [r.disposition === 'PREPARED_NOT_CONFIRMED'
-            ? 'SAVED' : r.disposition]);
+          auditRecords.map(record => [
+            record.disposition === 'PREPARED_NOT_CONFIRMED'
+              ? 'SAVED'
+              : record.disposition
+          ]);
         audit.getRange('O' + auditNextRow + ':O' + lastAuditRow).values =
-          auditRecords.map(r => [r.disposition === 'PREPARED_NOT_CONFIRMED'
-            ? savedAt : '']);
+          auditRecords.map(record => [
+            record.disposition === 'PREPARED_NOT_CONFIRMED'
+              ? savedAt
+              : ''
+          ]);
         await context.sync();
-        return { saved: writes.map(x => x.column + x.row), skipped,
-          backupName, auditRows: auditRecords.length };
+
+        return {
+          saved: writes.map(write => write.column + write.row),
+          skipped,
+          backupName,
+          auditRows: auditRecords.length
+        };
       });
 
       if (outcome.blocked) {
-        show('SAVE BLOCKED\n' + outcome.blocked);
-        message.textContent = outcome.blocked;
-        button.disabled = false;
-        button.textContent = 'Approve & save all eligible fields';
-        return;
-      }
-      if (outcome.noChanges) {
-        show('V10.4 — No eligible empty cells need saving. Existing values were preserved.');
-        message.textContent = 'No backup or audit rows were created because no Master values needed writing.';
-        button.textContent = 'No changes needed';
+        item.saving = false;
+        item.completed = true;
+        item.requiresResearch = true;
+        show('SAVE BLOCKED — ' + item.company + '\n' + outcome.blocked);
+        message.textContent = outcome.blocked + ' Run Research all company rows again before trying this company.';
+        button.disabled = true;
+        button.textContent = 'Re-research required — ' + item.company;
+        updateIndividualApprovalStatus(state);
         return;
       }
 
-      activeBatch = null;
+      if (outcome.noChanges) {
+        item.saving = false;
+        item.completed = true;
+        button.disabled = true;
+        button.textContent = 'No changes needed — ' + item.company;
+        message.textContent =
+          'No eligible empty cells were available. Existing values and formulas were preserved. No backup or audit entry was created.';
+        updateIndividualApprovalStatus(state);
+        return;
+      }
+
+      item.saving = false;
+      item.saved = true;
+      button.disabled = true;
+      button.textContent = 'Saved ✓ — ' + item.company;
+      message.textContent =
+        'Saved only ' + item.company + ' (row ' + item.row + '). ' +
+        'Backup: ' + outcome.backupName +
+        '. Audit rows: ' + outcome.auditRows +
+        '. Cells saved: ' + outcome.saved.join(', ') +
+        '. Existing cells skipped: ' + (outcome.skipped.join(', ') || 'none') + '.';
+
       show(
-        'V10.4 SAVE COMPLETE\n' +
+        'INDIVIDUAL SAVE COMPLETE\n' +
+        'Company: ' + item.company + '\n' +
+        'Company Master row: ' + item.row + '\n' +
         'Backup: ' + outcome.backupName + '\n' +
         'Audit: ' + AUDIT_SHEET + ' (' + outcome.auditRows + ' records)\n' +
         'Saved cells: ' + outcome.saved.join(', ') + '\n' +
-        'Skipped existing: ' + (outcome.skipped.join(', ') || 'none') + '\n' +
-        'Original formatting and existing AP notes preserved. Global metric sources are in the audit.'
+        'Skipped existing cells: ' + (outcome.skipped.join(', ') || 'none') + '\n' +
+        'All other company rows remain pending and unchanged.'
       );
-      message.textContent =
-        'Backup: ' + outcome.backupName + '. Audit: ' + AUDIT_SHEET +
-        '. Saved: ' + outcome.saved.length + '. Skipped: ' + outcome.skipped.length + '.';
-      button.textContent = 'Batch save complete';
+
+      updateIndividualApprovalStatus(state);
     } catch (error) {
-      show('SAVE NOT CONFIRMED\n' + errorText(error) + '\n' +
+      item.saving = false;
+      item.uncertain = true;
+      button.disabled = true;
+      button.textContent = 'Check workbook before retrying — ' + item.company;
+      const detail =
+        'Save outcome is not confirmed for ' + item.company + '. ' +
         (backupNameConfirmed ? 'Backup exists: ' + backupNameConfirmed + '. ' : '') +
-        (auditPrepared ? 'Audit prepared. Check whether result still says PREPARED_NOT_CONFIRMED.' :
-          'Audit preparation was not confirmed.') +
-        '\nInspect the workbook before retrying.');
-      message.textContent = 'Save not confirmed. Check the backup, audit and Company Master before another attempt.';
-      button.disabled = false;
-      button.textContent = 'Approve & save all eligible fields';
+        (auditPrepared
+          ? 'Audit was prepared; check for PREPARED_NOT_CONFIRMED entries.'
+          : 'Audit preparation was not confirmed.') +
+        ' Inspect this company row, its backup and Company Research Audit before retrying. ' +
+        errorText(error);
+
+      show('SAVE NOT CONFIRMED\n' + detail);
+      message.textContent = detail;
+      updateIndividualApprovalStatus(state);
     }
   }
 
@@ -1168,7 +1357,7 @@
   async function initialize() {
     if (active) {
       ensureBatchButton();
-      show('V10.4 READY\nUse Research all company rows for one consolidated review and approval.');
+      show('V10.4 READY\nResearch all company rows, then approve each company separately.');
       return;
     }
     if (starting) return;
@@ -1199,8 +1388,8 @@
       ensureBatchButton();
       show(
         'V10.4 READY — MALAYSIA COMPANY RESEARCH\n' +
-        'Use Research all company rows for a consolidated review.\n' +
-        'One approval creates a whole-worksheet backup before writing.\n' +
+        'Research all company rows, then approve each company separately.\n' +
+        'Each company approval creates its own worksheet backup before writing.\n' +
         'Only verified Malaysia-local candidates may be saved.\n' +
         'L/M/N are GLOBAL PARENT figures; their sources go to the audit.\n' +
         'Existing values, formulas, number formats and AP notes are preserved.'
