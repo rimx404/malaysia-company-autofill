@@ -2,10 +2,11 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
+
   <meta name="viewport"
         content="width=device-width, initial-scale=1">
 
-  <title>Malaysia Company Research V8</title>
+  <title>Malaysia Company Research V9</title>
 
   <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
 
@@ -111,41 +112,57 @@
 </head>
 
 <body>
-  <h1>Malaysia Company Research — V8</h1>
+
+  <h1>
+    Malaysia Company Research — V9
+  </h1>
 
   <p>
-    Review-first company research for
+    Malaysia-focused company research and
+    approval-based autofill for
     <strong>Company Master</strong>,
     column D, row 7 onward.
   </p>
 
   <div class="notice">
-    <strong>Safety:</strong>
-    Research covers global company background
-    and separate Malaysia-specific information.
+    <strong>Safety — Malaysia-Only Autofill:</strong>
 
-    Search results are not automatically verified.
+    Global company information is shown for
+    reference only.
 
-    You must approve before a research note is
-    saved to column AP.
+    Only supported Malaysia-specific details
+    are proposed for saving.
 
-    Existing values and formulas will not be
-    overwritten.
+    You must review and approve before
+    Excel cells are changed.
 
-    Company details in columns E, F, G and K
-    remain preview-only.
+    Only empty cells in columns E, F, K
+    and AP may be filled.
+
+    Existing values, formulas, formatting
+    and column headings are protected.
+
+    Columns G, L, M, N, O and AF to AI
+    will not be changed by V9.
+
+    Visa sponsorship is not automatically verified.
   </div>
 
-  <div id="status" role="status" aria-live="polite">
-    Loading V8 JavaScript...
+  <div id="status"
+       role="status"
+       aria-live="polite">
+    Loading V9 JavaScript...
   </div>
 
   <button id="retry" type="button">
     Retry connection
   </button>
 
-  <div id="results" aria-live="polite"></div>
+  <div id="results"
+       aria-live="polite">
+  </div>
 
-  <script src="taskpane.js?v=8-fixed-20261110"></script>
+  <script src="taskpane.js?v=9-malaysia-autofill-20261110"></script>
+
 </body>
 </html>
