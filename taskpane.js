@@ -1,2699 +1,655 @@
 (() => {
   'use strict';
 
-  // Malaysia Company Research task pane V10.5 — individual company approval.
-  // Each eligible column has its own Approve button.
-  // Approve only marks that column.
-  // A separate Save approved columns action writes only the selected fields
-  // for one company and creates that company's backup and audit.
-
-  const VERSION = '10.5';
+  // Malaysia Company Detector V10.5.1
+  // Research many companies, approve each eligible field without Excel writes,
+  // then save approved fields for ONE company after a backup and an audit.
+  // Company Master headers, formats, formulas and existing values are protected.
+  const VERSION = '10.5.1';
   const WORKER_VERSION = '10.3';
-  const WORKER =
-    'https://malaysia-company-research.rimli271.workers.dev';
-
-  const SHEET = 'Company Master';
-  const HEADER_ROW = 6;
+  const WORKER = 'https://malaysia-company-research.rimli271.workers.dev';
+  const MASTER = 'Company Master';
+  const AUDIT = 'Company Research Audit';
   const FIRST_ROW = 7;
-  const NOTE_COLUMN = 'AP';
-  const AUDIT_SHEET = 'Company Research Audit';
+  const HEADER_ROW = 6;
   const PLACEHOLDER = '[verify office address]';
-
-  const SELECTED_COLUMNS = [
-    'A', 'B', 'C', 'D', 'E', 'F', 'G', 'I', 'J', 'K',
-    'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'AE',
-    'AF', 'AG', 'AH', 'AI'
-  ];
-
-  const WRITABLE_COLUMNS = [
-    'E', 'F', 'G', 'I', 'J', 'K', 'L', 'M', 'N', 'O',
-    'P', 'Q', 'R', 'S', 'AF', 'AG', 'AH', 'AI'
-  ];
-
-  const GLOBAL_COLUMNS = new Set(['L', 'M', 'N']);
-  const REPORTING_DATE_COLUMNS = new Set(['L', 'M', 'N', 'O']);
-
-  const ALLOWED_STATUSES = new Set([
-    'official',
-    'official_lower_bound',
-    'reported_needs_review',
-    'derived_fx_estimate',
-    'review_required'
+  const COLUMNS = 'A B C D E F G I J K L M N O P Q R S AE AF AG AH AI'.split(' ');
+  const WRITABLE = new Set('E F G I J K L M N O P Q R S AF AG AH AI'.split(' '));
+  const GLOBAL = new Set(['L', 'M', 'N']);
+  const DATED = new Set(['L', 'M', 'N', 'O']);
+  const STATUSES = new Set([
+    'official', 'official_lower_bound', 'reported_needs_review',
+    'derived_fx_estimate', 'review_required'
   ]);
+  const AUDIT_HEADERS = [
+    'Run ID', 'Approved UTC', 'Company Master Row', 'Searched Company',
+    'Malaysia Record ID', 'Global Parent Wikidata ID', 'Excel Column',
+    'Existing Value', 'Proposed Value', 'Save Result', 'Data Scope',
+    'Research Status', 'Source URL', 'Research Notes / Reporting Date',
+    'Written UTC', 'Column Header'
+  ];
+  const HEADER_ALIASES = {
+    F: ['Company Headquarter', 'Company Headquarters'],
+    L: ['Company Revenue (code:MYR symbol:RM)', 'Company Revenue (MYR)', 'Company Revenue MYR'],
+    M: ['Company Revenue (USD)', 'Company Revenue USD'],
+    N: ['Employees (Global)', 'Global Employees'],
+    O: ['Employees (MY)', 'Employees Malaysia', 'Malaysia Employees'],
+    AF: ['Nearby Rental Location', 'Suggested Rental Location'],
+    AG: ['Rent Budget (MYR/mo)', 'Rent Budget MYR/mo', 'Monthly Rent Budget (MYR)'],
+    AH: ['Nearest Rail / Transit', 'Nearest Rail Transit', 'Nearest Transit'],
+    AI: ['Commute (min)', 'Commute Minutes', 'Commute (minutes)']
+  };
 
   const status = document.getElementById('status');
   const results = document.getElementById('results');
   const retry = document.getElementById('retry');
+  let initialized = false;
+  let initializing = false;
+  let researchButton = null;
+  let generation = 0;
+  let currentReview = null;
 
-  let active = false;
-  let starting = false;
-  let requestNumber = 0;
-  let batchButton = null;
-  let activeBatch = null;
-
-  function show(message) {
+  function say(message) {
     if (status) status.textContent = message;
   }
-
-  function clearResults() {
-    if (results) results.replaceChildren();
+  function add(parent, tag, content, className) {
+    const element = document.createElement(tag);
+    if (content !== undefined) element.textContent = String(content);
+    if (className) element.className = className;
+    parent.appendChild(element);
+    return element;
   }
-
-  function errorText(error) {
-    return String(error?.message || error);
+  function panel(parent, heading) {
+    const card = add(parent, 'section');
+    card.style.padding = '12px';
+    card.style.margin = '14px 0';
+    card.style.border = '1px solid #cbd5df';
+    card.style.borderRadius = '8px';
+    add(card, 'h3', heading);
+    return card;
   }
-
-  function addText(parent, tag, value, className) {
-    const node = document.createElement(tag);
-    node.textContent = String(value ?? '');
-    if (className) node.className = className;
-    parent.appendChild(node);
-    return node;
-  }
-
-  function addLink(parent, label, value) {
-    if (typeof value !== 'string' || !value.trim()) return null;
-
+  function link(parent, label, address) {
+    if (typeof address !== 'string') return;
     try {
-      const url = new URL(value);
-
-      if (url.protocol !== 'https:' && url.protocol !== 'http:') {
-        return null;
-      }
-
-      const anchor = document.createElement('a');
+      const url = new URL(address);
+      if (url.protocol !== 'https:') return;
+      const anchor = add(parent, 'a', label);
       anchor.href = url.href;
       anchor.target = '_blank';
       anchor.rel = 'noopener noreferrer';
-      anchor.textContent = label;
-
-      parent.appendChild(anchor);
-      return anchor;
-    } catch {
-      return null;
-    }
+    } catch { /* Missing/invalid source is not presented as a link. */ }
   }
-
-  function panel(parent, heading) {
-    const node = document.createElement('section');
-
-    node.style.padding = '12px';
-    node.style.marginTop = '14px';
-    node.style.border = '1px solid #cbd5df';
-    node.style.borderRadius = '8px';
-
-    addText(node, 'h3', heading);
-    parent.appendChild(node);
-
-    return node;
-  }
-
-  function displayValue(value) {
-    if (value === null || value === undefined || value === '') {
-      return 'Not available';
-    }
-
-    if (Array.isArray(value)) {
-      const parts = value
-        .map(x => String(x ?? '').trim())
-        .filter(Boolean);
-
-      return parts.length
-        ? [...new Set(parts)].join('; ')
-        : 'Not available';
-    }
-
-    if (typeof value === 'number') {
-      return Number.isFinite(value)
-        ? value.toLocaleString('en-US')
-        : 'Not available';
-    }
-
-    if (typeof value === 'object') {
-      return JSON.stringify(value);
-    }
-
+  function display(value) {
+    if (value === undefined || value === null || value === '') return 'Not available';
+    if (Array.isArray(value)) return value.map(String).join('; ') || 'Not available';
+    if (typeof value === 'number') return value.toLocaleString('en-US');
+    if (typeof value === 'object') return JSON.stringify(value);
     return String(value);
   }
-
-  function addField(parent, label, value, options = {}) {
-    const block = document.createElement('div');
-
-    block.style.padding = '8px 0';
-    block.style.borderBottom = '1px solid #e5e7eb';
-
-    addText(block, 'strong', label);
-    addText(block, 'p', displayValue(value));
-
-    if (options.scope) {
-      addText(block, 'p', 'Scope: ' + options.scope, 'small');
-    }
-
-    if (options.notes) {
-      addText(block, 'p', options.notes, 'small');
-    }
-
-    if (options.source) {
-      addLink(block, 'Open source', options.source);
-    }
-
-    parent.appendChild(block);
-    return block;
+  function field(parent, label, value, url) {
+    const block = add(parent, 'div');
+    block.style.margin = '8px 0';
+    add(block, 'strong', label);
+    add(block, 'p', display(value));
+    link(block, 'Source', url);
   }
-
-  function uniqueStrings(value) {
-    const values = Array.isArray(value) ? value : [value];
-
-    return [...new Set(values
-      .filter(item => typeof item === 'string')
-      .map(item => item.trim())
-      .filter(Boolean))];
+  function indexOfColumn(column) {
+    return [...column].reduce((n, c) => n * 26 + c.charCodeAt(0) - 64, 0) - 1;
   }
-
-  function columnNumber(letters) {
-    return [...letters].reduce(
-      (number, letter) =>
-        number * 26 + letter.charCodeAt(0) - 64,
-      0
-    );
-  }
-
-  function changedRow(address) {
-    const local = String(address || '')
-      .split('!')
-      .pop()
-      .replace(/\$/g, '')
-      .toUpperCase();
-
-    const match =
-      /^([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?$/.exec(local);
-
-    if (!match) return null;
-
-    const firstColumn = columnNumber(match[1]);
-    const lastColumn = columnNumber(match[3] || match[1]);
-
-    if (firstColumn > 4 || lastColumn < 4) return null;
-
-    const firstRow = Number(match[2]);
-    const lastRow = Number(match[4] || match[2]);
-
-    if (lastRow < FIRST_ROW) return null;
-
-    const start = Math.max(firstRow, FIRST_ROW);
-
-    if (start !== lastRow) {
-      return { multiple: true };
-    }
-
-    return { row: start, multiple: false };
-  }
-
-  async function readCompany(row) {
-    return Excel.run(async context => {
-      const sheet = context.workbook.worksheets.getItem(SHEET);
-      const cell = sheet.getRange('D' + row);
-
-      cell.load('values');
-      await context.sync();
-
-      return String(cell.values[0][0] ?? '').trim();
-    });
-  }
-
-  function validGlobalParentId(id) {
-    return /^Q\d+$/.test(String(id || ''));
-  }
-
-  function validMalaysiaSaveTarget(candidate, data) {
-    if (!candidate || !data ||
-        data.version !== WORKER_VERSION) {
-      return false;
-    }
-
-    const targetId =
-      String(data.save_target_candidate_id || '');
-
-    const candidateId =
-      String(candidate.candidate_id || '');
-
-    const parentId =
-      String(candidate.global_parent_wikidata_id || '');
-
-    const identity = candidate.record_identity || {};
-
-    return Boolean(
-      targetId &&
-      candidateId === targetId &&
-      candidate.candidate_role === 'MALAYSIA_SAVE_CANDIDATE' &&
-      candidate.save_eligible === true &&
-      (
-        candidate.record_type === 'malaysia_network' ||
-        candidate.record_type === 'malaysia_company'
-      ) &&
-      identity.scope === 'Malaysia' &&
-      identity.record_id === candidateId &&
-      identity.type === candidate.record_type &&
-      candidate.verified_malaysia_presence === true &&
-
-      evidenceItems(candidate).some(item =>
-        item?.verified === true &&
-        typeof item.source_url === 'string' &&
-        item.source_url.startsWith('https://')
-      ) &&
-
-      identity.parent_wikidata_id === parentId &&
-      identity.parent_reference_id === 'GLOBAL:' + parentId &&
-      candidate.global_parent_candidate_id === 'GLOBAL:' + parentId &&
-
-      data.save_policy?.write_from_candidate_id_only === candidateId &&
-      data.save_policy?.local_record_only === true &&
-      data.save_policy?.reference_only_candidates_must_never_be_saved === true &&
-      data.save_policy?.global_parent_is_reference_only === true &&
-
-      data.approval_required === true &&
-      data.excel_unchanged === true &&
-      validGlobalParentId(parentId)
-    );
-  }
-
-  function getSingleSaveTarget(data) {
-    if (
-      !data ||
-      data.version !== WORKER_VERSION ||
-      !Array.isArray(data.candidates)
-    ) {
-      return null;
-    }
-
-    const eligible = data.candidates.filter(candidate =>
-      candidate?.save_eligible === true &&
-      candidate?.candidate_role === 'MALAYSIA_SAVE_CANDIDATE'
-    );
-
-    if (eligible.length !== 1) return null;
-
-    if (
-      data.save_target_candidate_id !==
-      eligible[0].candidate_id
-    ) {
-      return null;
-    }
-
-    return validMalaysiaSaveTarget(eligible[0], data)
-      ? eligible[0]
-      : null;
-  }
-
-  function normalizeHeader(value) {
-    return String(value ?? '')
-      .toLowerCase()
-      .replace(/\b(code|symbol)\b/g, '')
-      .replace(/[^a-z0-9]/g, '')
-      .replace(/s$/, '');
-  }
-
-  const HEADER_ALIASES = {
-    F: [
-      'Company Headquarter',
-      'Company Headquarters'
-    ],
-
-    L: [
-      'Company Revenue (code:MYR symbol:RM)',
-      'Company Revenue (MYR)',
-      'Company Revenue MYR'
-    ],
-
-    M: [
-      'Company Revenue (USD)',
-      'Company Revenue USD'
-    ],
-
-    N: [
-      'Employees (Global)',
-      'Global Employees'
-    ],
-
-    O: [
-      'Employees (MY)',
-      'Employees Malaysia',
-      'Malaysia Employees'
-    ],
-
-    AF: [
-      'Nearby Rental Location',
-      'Suggested Rental Location'
-    ],
-
-    AG: [
-      'Rent Budget (MYR/mo)',
-      'Rent Budget MYR/mo',
-      'Monthly Rent Budget (MYR)'
-    ],
-
-    AH: [
-      'Nearest Rail / Transit',
-      'Nearest Rail Transit',
-      'Nearest Transit'
-    ],
-
-    AI: [
-      'Commute (min)',
-      'Commute Minutes',
-      'Commute (minutes)'
-    ]
-  };
-
-  function headerMatches(actual, expected, column) {
-    const actualNorm = normalizeHeader(actual);
-
-    const choices = [
-      expected,
-      ...(HEADER_ALIASES[column] || [])
-    ]
-      .filter(Boolean)
-      .map(normalizeHeader);
-
-    return Boolean(
-      actualNorm && choices.includes(actualNorm)
-    );
-  }
-
-  function normalizeProposedValue(value) {
-    if (typeof value === 'number') {
-      return Number.isFinite(value) ? value : null;
-    }
-
-    if (typeof value === 'string') {
-      const cleaned = value.trim();
-      return cleaned ? cleaned : null;
-    }
-
-    if (typeof value === 'boolean') return value;
-
-    return null;
-  }
-
-  function validHttpsSource(value) {
-    try {
-      const url = new URL(String(value || ''));
-      return url.protocol === 'https:';
-    } catch {
-      return false;
-    }
-  }
-
-  function hasReportingDate(item) {
-    const sourceText = [
-      item?.reporting_date,
-      item?.as_of,
-      item?.date,
-      item?.notes
-    ]
-      .filter(Boolean)
-      .join(' ');
-
-    return /(?:as of|reporting date|published|dated|\bon\b)\s*:?\s*(?:\+)?\d{4}(?:-\d{2}(?:-\d{2})?)?/i
-      .test(sourceText);
-  }
-
-  function proposedValues(candidate) {
-    const rows = Array.isArray(candidate.column_research)
-      ? candidate.column_research
-      : [];
-
-    const proposed = {};
-    const audit = [];
-
-    for (const item of rows) {
-      if (!item || !WRITABLE_COLUMNS.includes(item.column)) {
-        continue;
-      }
-
-      const column = item.column;
-      const value = normalizeProposedValue(item.value);
-
-      const isGlobal = GLOBAL_COLUMNS.has(column);
-
-      const expectedScope = isGlobal
-        ? 'global_group_metric'
-        : 'malaysia_company';
-
-      const scopeOK = item.scope === expectedScope;
-      const statusOK = ALLOWED_STATUSES.has(item.status);
-      const sourceOK = validHttpsSource(item.source_url);
-
-      const dateOK =
-        !REPORTING_DATE_COLUMNS.has(column) ||
-        hasReportingDate(item);
-
-      if (
-        value !== null &&
-        scopeOK &&
-        statusOK &&
-        sourceOK &&
-        dateOK
-      ) {
-        proposed[column] = {
-          value,
-          status: item.status,
-          source_url: item.source_url || null,
-          scope: item.scope,
-          notes: String(item.notes || ''),
-          header: String(item.header || '')
-        };
-      }
-
-      audit.push({
-        column,
-        header: String(item.header || ''),
-        value,
-        status: String(item.status || 'unknown'),
-        scope: String(item.scope || 'not specified'),
-        scope_ok: scopeOK,
-        status_ok: statusOK,
-        source_ok: sourceOK,
-        reporting_date_ok: dateOK,
-        source_url: item.source_url || null,
-        notes: String(item.notes || '')
-      });
-    }
-
-    return { proposed, audit };
-  }
-
-  function evidenceItems(candidate) {
-    const items =
-      candidate?.malaysia_profile?.malaysia_evidence;
-
-    return Array.isArray(items) ? items : [];
-  }
-
-  function buildResearchNote(
-    company,
-    candidate,
-    proposed,
-    audit
-  ) {
-    const lines = [
-      'MALAYSIA COMPANY MASTER — APPROVED RESEARCH NOTE V10.5',
-
-      'Saved at (UTC): ' + new Date().toISOString(),
-
-      'Company entered in D: ' + company,
-
-      'Malaysia record name: ' + String(candidate.name || ''),
-
-      'Malaysia record ID: ' + String(candidate.candidate_id || ''),
-
-      'Record type: ' + String(candidate.record_type || ''),
-
-      'Global parent: ' + String(candidate.global_parent_name || ''),
-
-      'Global parent Wikidata ID: ' +
-        String(candidate.global_parent_wikidata_id || ''),
-
-      'Global parent record is reference-only; no separate global row is saved.',
-
-      '',
-
-      'GLOBAL PARENT METRICS — SAVED ON THIS MALAYSIA COMPANY ROW ONLY'
-    ];
-
-    for (const column of ['L', 'M', 'N']) {
-      const item = proposed[column];
-
-      if (item) {
-        lines.push(
-          column + ' — ' + item.header + ': ' +
-          String(item.value) +
-          ' [GLOBAL PARENT; ' + item.status + ']' +
-          (item.notes ? ' — ' + item.notes : '') +
-          (item.source_url
-            ? ' — Source: ' + item.source_url
-            : '')
-        );
-      } else {
-        lines.push(
-          column + ': no supported global-parent figure saved.'
-        );
-      }
-    }
-
-    lines.push('', 'MALAYSIA-SPECIFIC VALUES');
-
-    for (const [column, item] of Object.entries(proposed)) {
-      if (GLOBAL_COLUMNS.has(column)) continue;
-
-      lines.push(
-        column + ' — ' + item.header + ': ' +
-        String(item.value) +
-        ' [' + item.status + ']' +
-        (item.notes ? ' — ' + item.notes : '') +
-        (item.source_url
-          ? ' — Source: ' + item.source_url
-          : '')
-      );
-    }
-
-    lines.push('', 'COLUMN RESEARCH AUDIT');
-
-    for (const item of audit) {
-      lines.push(
-        item.column + ' — ' + item.header +
-        ' | status=' + item.status +
-        ' | scope=' + item.scope +
-        ' | value=' +
-        (item.value === null
-          ? 'not available'
-          : String(item.value)) +
-        ' | ' + item.notes +
-        (item.source_url
-          ? ' | source=' + item.source_url
-          : '')
-      );
-    }
-
-    lines.push('', 'MALAYSIA SOURCE EVIDENCE');
-
-    for (const item of evidenceItems(candidate)) {
-      lines.push(
-        (item.verified === true
-          ? 'CHECKED: '
-          : 'REVIEW ONLY: ') +
-        String(item.type || 'Source') +
-        ' — ' +
-        String(item.note || '') +
-        (item.source_url
-          ? ' — ' + item.source_url
-          : '')
-      );
-    }
-
-    lines.push(
-      '',
-      'IMPORTANT LIMITATIONS',
-      'L/M/N are global-parent metrics, not Malaysia subsidiary figures.',
-      'O is Malaysia workforce only.',
-      'Converted revenue is an estimate using the stated historical FX rate, not separately reported revenue.',
-      'Visa sponsorship must be supported by explicit employer/job evidence.',
-      'Rental amounts and commute estimates must be supported by current, comparable sources.',
-      'Unsupported fields were left blank; no values were invented.',
-      'Existing Excel values and formulas were not overwritten.'
-    );
-
-    return lines.join('\n').slice(0, 30000);
-  }
-
-  function renderGlobalProfile(parent, candidate) {
-    const g = candidate.global_profile || {};
-
-    const section = panel(
-      parent,
-      'Global parent — reference information'
-    );
-
-    addText(
-      section,
-      'p',
-      'This global record is for context only. It is never an Excel save candidate.'
-    );
-
-    addField(section, 'Global company type', g.company_type);
-    addField(section, 'Global headquarters', g.headquarters);
-    addField(section, 'Global industry', g.industry);
-    addField(section, 'Country', g.country);
-    addField(section, 'Country of origin', g.country_of_origin);
-    addField(section, 'Global websites', g.websites);
-
-    const globalId =
-      candidate.global_parent_wikidata_id ||
-      candidate.wikidata_id;
-
-    if (validGlobalParentId(globalId)) {
-      addLink(
-        section,
-        'Open global Wikidata record',
-        'https://www.wikidata.org/wiki/' + globalId
-      );
-    }
-  }
-
-  function renderMalaysiaProfile(parent, candidate) {
-    const p = candidate.malaysia_profile || {};
-
-    const section = panel(
-      parent,
-      'Malaysia-specific company information'
-    );
-
-    addField(section, 'Malaysia presence', p.malaysia_presence_status);
-
-    addField(
-      section,
-      'Malaysia company / network name',
-      p.malaysia_company_name
-    );
-
-    addField(
-      section,
-      'Malaysia main office',
-      p.malaysia_headquarters
-    );
-
-    addField(
-      section,
-      'Malaysia office address',
-      p.malaysia_office_address
-    );
-
-    addField(section, 'Malaysia website', p.malaysia_website);
-
-    addField(
-      section,
-      'Malaysia careers website',
-      p.malaysia_careers_url
-    );
-
-    addField(section, 'Malaysia industry', p.industry_local);
-
-    addField(section, 'Malaysia employees', p.employees_my, {
-      notes: p.employees_my_scope || ''
-    });
-
-    addField(section, 'Research note', p.research_note);
-
-    addText(section, 'h4', 'Malaysia source evidence');
-
-    const items = evidenceItems(candidate);
-
-    if (!items.length) {
-      addText(section, 'p', 'No Malaysia evidence was supplied.');
-    }
-
-    items.forEach(item => {
-      const label =
-        (item?.verified === true
-          ? 'Checked: '
-          : 'Review only: ') +
-        String(item?.type || 'Source');
-
-      addText(section, 'strong', label);
-      addText(section, 'p', String(item?.note || ''));
-
-      addLink(section, 'View source', item?.source_url);
-    });
-  }
-
-  // ============================================================
-  // INDIVIDUAL COLUMN APPROVAL BUTTONS
-  // ============================================================
-
-  function renderColumnPreview(parent, item, state) {
-    const candidate = item.target;
-    const proposal = item.proposal;
-    const row = item.row;
-    const snapshot = state.snapshot;
-
-    const section = panel(
-      parent,
-      '23-column Company Master research preview — row ' + row
-    );
-
-    addText(
-      section,
-      'p',
-      'Each eligible column has its own Approve button. Approve only marks that column for review; it does NOT change Excel. Use the separate Save approved columns button for this company when you are ready.'
-    );
-
-    const rows = Array.isArray(candidate.column_research)
-      ? candidate.column_research
-      : [];
-
-    const byColumn = new Map(
-      rows.map(value => [value.column, value])
-    );
-
-    const rowValues =
-      snapshot?.values?.[row - 1] || [];
-
-    const rowFormulas =
-      snapshot?.formulas?.[row - 1] || [];
-
-    item.approvedColumns =
-      item.approvedColumns || new Set();
-
-    item.columnApprovalButtons =
-      item.columnApprovalButtons || new Map();
-
-    SELECTED_COLUMNS.forEach(column => {
-      const research = byColumn.get(column) || {};
-      const proposed = proposal.proposed[column];
-
-      const index = columnNumber(column) - 1;
-
-      const currentValue = rowValues[index];
-      const currentFormula = rowFormulas[index];
-
-      const hasFormula =
-        typeof currentFormula === 'string' &&
-        currentFormula.startsWith('=');
-
-      const isEmpty =
-        (
-          currentValue === null ||
-          currentValue === undefined ||
-          currentValue === ''
-        ) && !hasFormula;
-
-      const exactPlaceholder =
-        column === 'J' &&
-        currentValue === PLACEHOLDER &&
-        !hasFormula;
-
-      const block = document.createElement('div');
-
-      block.style.padding = '9px 0';
-      block.style.borderBottom = '1px solid #e5e7eb';
-
-      const globalLabel = GLOBAL_COLUMNS.has(column)
-        ? ' — GLOBAL PARENT / NOT MALAYSIA HEADCOUNT OR SUBSIDIARY REVENUE'
-        : '';
-
-      addText(
-        block,
-        'strong',
-        column + ' — ' +
-        (research.header || 'Selected column') +
-        globalLabel
-      );
-
-      if (proposed) {
-        const scopeLabel = GLOBAL_COLUMNS.has(column)
-          ? 'GLOBAL PARENT METRIC — NOT MALAYSIA ENTITY'
-          : 'MALAYSIA-SPECIFIC';
-
-        addText(
-          block,
-          'p',
-          displayValue(proposed.value) +
-          '  |  ' + scopeLabel
-        );
-
-        addText(
-          block,
-          'p',
-          'Research status: ' + proposed.status,
-          'small'
-        );
-
-        if (proposed.notes) {
-          addText(block, 'p', proposed.notes, 'small');
-        }
-
-        if (proposed.source_url) {
-          addLink(block, 'Open source', proposed.source_url);
-        }
-
-        if (isEmpty) {
-          addText(
-            block,
-            'p',
-            'Action: eligible for individual approval.',
-            'small'
-          );
-        } else if (exactPlaceholder) {
-          addText(
-            block,
-            'p',
-            'Action: exact placeholder only; requires the separate row-specific checkbox below.',
-            'small'
-          );
-        } else {
-          addText(
-            block,
-            'p',
-            'Action: existing value or formula detected — will be skipped and preserved.',
-            'small'
-          );
-
-          addText(
-            block,
-            'p',
-            'Current Excel value: ' +
-            displayValue(currentValue),
-            'small'
-          );
-        }
-      } else {
-        let reason;
-
-        if (research.status === 'protected') {
-          reason = 'Protected column — never autofilled.';
-        } else if (
-          research.value === null ||
-          research.value === undefined ||
-          research.value === ''
-        ) {
-          reason = 'No supported value returned — will not be written.';
-        } else if (
-          REPORTING_DATE_COLUMNS.has(column) &&
-          !hasReportingDate(research)
-        ) {
-          reason =
-            'Not eligible to save: reporting date is missing. The dated-figure rule remains in force.';
-        } else if (!validHttpsSource(research.source_url)) {
-          reason =
-            'Not eligible to save: no valid HTTPS source URL was supplied.';
-        } else {
-          reason =
-            'Not eligible to save: status or source scope did not pass the safety checks.';
-        }
-
-        addText(block, 'p', reason);
-
-        if (research.status) {
-          addText(
-            block,
-            'p',
-            'Research status: ' + research.status,
-            'small'
-          );
-        }
-
-        if (research.scope) {
-          addText(
-            block,
-            'p',
-            'Scope: ' + research.scope,
-            'small'
-          );
-        }
-
-        if (research.notes) {
-          addText(block, 'p', research.notes, 'small');
-        }
-
-        if (research.source_url) {
-          addLink(block, 'Open source', research.source_url);
-        }
-
-        if (!isEmpty) {
-          addText(
-            block,
-            'p',
-            'Current Excel value: ' +
-            displayValue(currentValue) +
-            ' — preserved.',
-            'small'
-          );
-        }
-      }
-
-      // IMPORTANT:
-      // This button ONLY marks/unmarks the individual column.
-      // It does not call Excel.run, sync, or write worksheet cells.
-
-      const fieldApprove =
-        document.createElement('button');
-
-      fieldApprove.type = 'button';
-      fieldApprove.textContent = 'Approve';
-
-      fieldApprove.style.display = 'inline-block';
-      fieldApprove.style.margin = '6px 0 2px';
-      fieldApprove.style.padding = '9px 14px';
-      fieldApprove.style.border = '1px solid #137f5b';
-      fieldApprove.style.borderRadius = '6px';
-      fieldApprove.style.background = '#137f5b';
-      fieldApprove.style.color = '#ffffff';
-      fieldApprove.style.fontWeight = '600';
-
-      fieldApprove.disabled =
-        !canApproveColumn(state, item, column);
-
-      fieldApprove.addEventListener('click', () => {
-        if (item.approvedColumns.has(column)) {
-          item.approvedColumns.delete(column);
-        } else if (
-          canApproveColumn(state, item, column)
-        ) {
-          item.approvedColumns.add(column);
-        }
-
-        updateColumnApprovalControls(state, item);
-      });
-
-      item.columnApprovalButtons.set(
-        column,
-        fieldApprove
-      );
-
-      block.appendChild(fieldApprove);
-      section.appendChild(block);
-    });
-
-    addText(
-      section,
-      'p',
-      'Protected: A, B, C, D and AE. H, T:AD and AJ:AO are outside this research set. All remain unchanged.'
-    );
-
-    updateColumnApprovalControls(state, item);
-  }
-
-  function ensureBatchButton() {
-    if (batchButton || !results?.parentElement) return;
-
-    batchButton = document.createElement('button');
-
-    batchButton.type = 'button';
-    batchButton.textContent = 'Research all company rows';
-
-    batchButton.style.display = 'block';
-    batchButton.style.width = '100%';
-    batchButton.style.margin = '10px 0';
-    batchButton.style.padding = '12px 14px';
-    batchButton.style.border = '0';
-    batchButton.style.borderRadius = '6px';
-    batchButton.style.background = '#137f5b';
-    batchButton.style.color = '#ffffff';
-    batchButton.style.fontWeight = '600';
-    batchButton.style.cursor = 'pointer';
-
-    batchButton.addEventListener(
-      'click',
-      researchAllCompanies
-    );
-
-    results.parentElement.insertBefore(
-      batchButton,
-      results
-    );
-  }
-
-  async function readCompanyMasterSnapshot() {
-    return Excel.run(async context => {
-      const sheet =
-        context.workbook.worksheets.getItem(SHEET);
-
-      const used =
-        sheet.getUsedRangeOrNullObject(true);
-
-      used.load('isNullObject,rowIndex,rowCount');
-      await context.sync();
-
-      if (used.isNullObject) {
-        return {
-          lastRow: HEADER_ROW,
-          values: [],
-          formulas: [],
-          companies: []
-        };
-      }
-
-      const lastRow = Math.max(
-        HEADER_ROW,
-        used.rowIndex + used.rowCount
-      );
-
-      const source =
-        sheet.getRange('A1:AP' + lastRow);
-
-      source.load('values,formulas');
-      await context.sync();
-
-      const companies = [];
-
-      for (
-        let row = FIRST_ROW;
-        row <= lastRow;
-        row++
-      ) {
-        const company = String(
-          source.values[row - 1]?.[
-            columnNumber('D') - 1
-          ] ?? ''
-        ).trim();
-
-        if (!company) continue;
-
-        companies.push({
-          row,
-          company,
-
-          officeAddressValue:
-            source.values[row - 1]?.[
-              columnNumber('J') - 1
-            ],
-
-          officeAddressFormula:
-            source.formulas[row - 1]?.[
-              columnNumber('J') - 1
-            ]
-        });
-      }
-
-      return {
-        lastRow,
-        values: source.values,
-        formulas: source.formulas,
-        companies
-      };
-    });
-  }
-
-  async function fetchResearchData(company, token) {
-    const controller = new AbortController();
-
-    const timeout = setTimeout(
-      () => controller.abort(),
-      45000
-    );
-
-    try {
-      const response = await fetch(
-        WORKER +
-        '/research?company=' +
-        encodeURIComponent(company),
-        {
-          method: 'GET',
-          headers: {
-            Accept: 'application/json'
-          },
-          cache: 'no-store',
-          signal: controller.signal
-        }
-      );
-
-      if (!response.ok) {
-        throw new Error(
-          'Research HTTP ' + response.status
-        );
-      }
-
-      const data = await response.json();
-
-      if (token !== requestNumber) return null;
-
-      if (data.version !== WORKER_VERSION) {
-        throw new Error(
-          'Worker version mismatch. Task pane expects V' +
-          WORKER_VERSION +
-          ', received V' +
-          String(data.version || 'unknown') +
-          '.'
-        );
-      }
-
-      if (data.status !== 'candidates_for_review') {
-        throw new Error(
-          data.message ||
-          'Worker did not return candidates_for_review.'
-        );
-      }
-
-      return data;
-    } finally {
-      clearTimeout(timeout);
-    }
-  }
-
-  // ============================================================
-  // APPROVAL ELIGIBILITY
-  // ============================================================
-
-  function canApproveColumn(state, item, column) {
-    if (
-      !state ||
-      !item?.target ||
-      item.saved ||
-      item.completed ||
-      item.uncertain ||
-      item.saving
-    ) {
-      return false;
-    }
-
-    if (
-      !WRITABLE_COLUMNS.includes(column) ||
-      !Object.prototype.hasOwnProperty.call(
-        item.proposal?.proposed || {},
-        column
-      )
-    ) {
-      return false;
-    }
-
-    const rowValues =
-      state.snapshot.values[item.row - 1] || [];
-
-    const rowFormulas =
-      state.snapshot.formulas[item.row - 1] || [];
-
-    const index = columnNumber(column) - 1;
-
-    const value = rowValues[index];
-    const formula = rowFormulas[index];
-
-    const hasFormula =
-      typeof formula === 'string' &&
-      formula.startsWith('=');
-
-    const empty =
-      (
-        value === null ||
-        value === undefined ||
-        value === ''
-      ) && !hasFormula;
-
-    if (empty) return true;
-
-    const permission =
-      state.placeholderPermissions.get(item.row)?.checked === true;
-
-    return (
-      column === 'J' &&
-      permission &&
-      value === PLACEHOLDER &&
-      !hasFormula
-    );
-  }
-
-  function canWriteCompanyItem(state, item) {
-    if (
-      !state ||
-      !item?.approvedColumns ||
-      item.approvedColumns.size === 0 ||
-      item.saved ||
-      item.completed ||
-      item.uncertain ||
-      item.saving
-    ) {
-      return false;
-    }
-
-    return [...item.approvedColumns].some(column =>
-      canApproveColumn(state, item, column)
-    );
-  }
-
-  function updateColumnApprovalControls(state, item) {
-    if (!item) return;
-
-    const terminal =
-      item.saved ||
-      item.completed ||
-      item.uncertain ||
-      item.saving;
-
-    for (
-      const [column, button]
-      of (item.columnApprovalButtons || new Map())
-    ) {
-      const approved =
-        item.approvedColumns?.has(column) === true;
-
-      const eligible =
-        canApproveColumn(state, item, column);
-
-      button.textContent = approved
-        ? 'Approved ✓ (click to undo)'
-        : 'Approve';
-
-      button.disabled =
-        terminal || (!eligible && !approved);
-
-      button.style.background = approved
-        ? '#e7f5ed'
-        : '#137f5b';
-
-      button.style.color = approved
-        ? '#137f5b'
-        : '#ffffff';
-    }
-
-    const approvedCount =
-      [...(item.approvedColumns || [])].filter(
-        column => canApproveColumn(state, item, column)
-      ).length;
-
-    if (item.approveButton) {
-      item.approveButton.disabled =
-        terminal || approvedCount === 0;
-
-      if (
-        !item.saved &&
-        !item.completed &&
-        !item.uncertain &&
-        !item.saving
-      ) {
-        item.approveButton.textContent =
-          'Save approved columns — ' + item.company;
-      }
-    }
-
-    if (item.approvalMessage) {
-      if (
-        item.saved ||
-        item.completed ||
-        item.uncertain
-      ) {
-        // Keep the specific save outcome message.
-      } else if (item.saving) {
-        item.approvalMessage.textContent =
-          'Saving only the approved columns for this company. Other companies remain untouched.';
-      } else if (approvedCount > 0) {
-        item.approvalMessage.textContent =
-          approvedCount +
-          ' column(s) approved. Nothing has been written to Excel yet. Press the separate Save approved columns button when ready.';
-      } else {
-        item.approvalMessage.textContent =
-          'No columns approved yet. Use the Approve button beside each eligible column above. Approving does not change Excel.';
-      }
-    }
-  }
-
-  function updateIndividualApprovalStatus(state) {
-    const saved =
-      state.items.filter(item => item.saved).length;
-
-    const pending =
-      state.items.filter(item =>
-        item.target &&
-        !item.saved &&
-        !item.completed &&
-        !item.uncertain
-      ).length;
-
-    const errors =
-      state.items.filter(item => item.error).length;
-
-    const uncertain =
-      state.items.filter(item => item.uncertain).length;
-
-    const reResearch =
-      state.items.filter(item => item.requiresResearch).length;
-
-    show(
-      'V10.5 INDIVIDUAL APPROVAL REVIEW\n' +
-
-      'Companies researched: ' +
-      state.snapshot.companies.length +
-
-      '\nSaved individually: ' + saved +
-
-      '\nCompanies awaiting column approval / save: ' +
-      pending +
-
-      '\nResearch errors: ' + errors +
-
-      '\nCompanies requiring fresh research: ' +
-      reResearch +
-
-      '\nSave results requiring workbook inspection: ' +
-      uncertain +
-
-      '\nEach column has its own Approve button. Approving does not write Excel; Save approved columns is separate and company-specific.'
-    );
-  }
-
-  // ============================================================
-  // COMPANY-BY-COMPANY REVIEW
-  // ============================================================
-
-  function renderBatchReview(state) {
-    clearResults();
-
-    if (!results) return;
-
-    const { items, snapshot } = state;
-
-    addText(
-      results,
-      'h2',
-      'Company-by-company review'
-    );
-
-    addText(
-      results,
-      'p',
-      'Worker version: ' + WORKER_VERSION
-    );
-
-    addText(
-      results,
-      'p',
-      'Company rows researched: ' +
-      snapshot.companies.length
-    );
-
-    addText(
-      results,
-      'p',
-      'Research is performed together for convenience. Approve each column separately, then use that company’s separate Save approved columns button. Approving never changes Excel or saves another company.'
-    );
-
-    addText(
-      results,
-      'p',
-      'The separate Save approved columns action creates a worksheet backup and source-by-source audit for that company. Only columns you approved are written.'
-    );
-
-    items.forEach(item => {
-      const card = panel(
-        results,
-        'D' + item.row + ' — ' + item.company
-      );
-
-      if (item.error) {
-        addText(
-          card,
-          'p',
-          'Research failed: ' + item.error
-        );
-
-        addText(
-          card,
-          'p',
-          'No Excel changes have been made for this company.'
-        );
-
-        return;
-      }
-
-      if (!item.target) {
-        addText(
-          card,
-          'p',
-          'No unique verified Malaysia save candidate was returned.'
-        );
-
-        addText(
-          card,
-          'p',
-          'Global and other search candidates are reference-only and cannot be saved.'
-        );
-
-        const refs = Array.isArray(item.data?.candidates)
-          ? item.data.candidates
-          : [];
-
-        refs.slice(0, 3).forEach(candidate => {
-          addText(
-            card,
-            'p',
-            String(candidate.name || 'Unnamed candidate') +
-            ' — ' +
-            String(candidate.display_label || 'Reference only')
-          );
-
-          if (candidate.source_url) {
-            addLink(
-              card,
-              'Open reference source',
-              candidate.source_url
-            );
-          }
-        });
-
-        return;
-      }
-
-      addText(
-        card,
-        'p',
-        'Malaysia save candidate: ' + item.target.name
-      );
-
-      addText(
-        card,
-        'p',
-        'Malaysia record ID: ' +
-        item.target.candidate_id,
-        'small'
-      );
-
-      addText(
-        card,
-        'p',
-        'Global parent: ' +
-        String(item.target.global_parent_name || 'Not supplied') +
-        ' — reference only, except for the explicitly labelled L/M/N metrics.',
-        'small'
-      );
-
-      renderGlobalProfile(card, item.target);
-
-      renderMalaysiaProfile(card, item.target);
-
-      renderColumnPreview(card, item, state);
-
-      const rowValues =
-        snapshot.values[item.row - 1] || [];
-
-      const apValue =
-        rowValues[columnNumber(NOTE_COLUMN) - 1];
-
-      if (
-        apValue !== null &&
-        apValue !== undefined &&
-        apValue !== ''
-      ) {
-        addText(
-          card,
-          'p',
-          'AP' + item.row +
-          ' already contains a note. It will be preserved; the new research note will not replace it.',
-          'small'
-        );
-      } else {
-        addText(
-          card,
-          'p',
-          'AP' + item.row +
-          ' is empty. A research note may be added as part of this company’s individual approval.',
-          'small'
-        );
-      }
-
-      const jProposal =
-        item.proposal.proposed.J;
-
-      const jValue =
-        rowValues[columnNumber('J') - 1];
-
-      const jFormula =
-        (snapshot.formulas[item.row - 1] || [])[
-          columnNumber('J') - 1
-        ];
-
-      const jHasFormula =
-        typeof jFormula === 'string' &&
-        jFormula.startsWith('=');
-
-      if (
-        jProposal &&
-        jValue === PLACEHOLDER &&
-        !jHasFormula
-      ) {
-        const label = document.createElement('label');
-
-        label.style.display = 'block';
-        label.style.padding = '10px 0';
-
-        const checkbox =
-          document.createElement('input');
-
-        checkbox.type = 'checkbox';
-        checkbox.checked = false;
-        checkbox.style.marginRight = '8px';
-
-        label.appendChild(checkbox);
-
-        label.appendChild(
-          document.createTextNode(
-            'Allow replacing only the exact text ' +
-            PLACEHOLDER +
-            ' in J' + item.row +
-            '. No other existing value may be replaced.'
-          )
-        );
-
-        card.appendChild(label);
-
-        state.placeholderPermissions.set(
-          item.row,
-          checkbox
-        );
-      }
-
-      // Separate save action for this one company.
-      const approval = document.createElement('div');
-
-      approval.style.marginTop = '14px';
-      approval.style.paddingTop = '12px';
-      approval.style.borderTop = '1px solid #cbd5df';
-
-      addText(
-        approval,
-        'strong',
-        'Save approved columns — ' + item.company
-      );
-
-      addText(
-        approval,
-        'p',
-        'This is a separate save action. It writes only the columns you marked Approved above, and only for ' +
-        item.company +
-        ' in Company Master row ' +
-        item.row +
-        '. The per-column Approve buttons do not write to Excel. No other company is saved.'
-      );
-
-      const approve =
-        document.createElement('button');
-
-      approve.type = 'button';
-
-      approve.textContent =
-        'Save approved columns — ' + item.company;
-
-      approve.disabled =
-        !canWriteCompanyItem(state, item);
-
-      approve.style.display = 'block';
-      approve.style.width = '100%';
-      approve.style.padding = '13px';
-      approve.style.border = '0';
-      approve.style.borderRadius = '6px';
-
-      approve.style.background =
-        approve.disabled ? '#9ca3af' : '#137f5b';
-
-      approve.style.color = '#ffffff';
-      approve.style.fontWeight = '600';
-
-      const message = addText(
-        approval,
-        'p',
-        'No columns approved yet. Use the Approve button beside each eligible column above. Nothing is saved by approving.',
-        'small'
-      );
-
-      item.approveButton = approve;
-      item.approvalMessage = message;
-
-      approve.addEventListener(
-        'click',
-        () => saveCompany(
-          state,
-          item,
-          approve,
-          message
-        )
-      );
-
-      const placeholderCheckbox =
-        state.placeholderPermissions.get(item.row);
-
-      if (placeholderCheckbox) {
-        placeholderCheckbox.addEventListener(
-          'change',
-          () => {
-            if (
-              item.saved ||
-              item.completed ||
-              item.uncertain ||
-              item.saving
-            ) {
-              return;
-            }
-
-            if (!placeholderCheckbox.checked) {
-              item.approvedColumns.delete('J');
-            }
-
-            updateColumnApprovalControls(state, item);
-          }
-        );
-      }
-
-      approval.appendChild(approve);
-      card.appendChild(approval);
-
-      updateColumnApprovalControls(state, item);
-    });
-
-    updateIndividualApprovalStatus(state);
-  }
-
-  // ============================================================
-  // RESEARCH ALL COMPANIES
-  // ============================================================
-
-  async function researchAllCompanies() {
-    const token = ++requestNumber;
-
-    activeBatch = null;
-
-    clearResults();
-    ensureBatchButton();
-
-    if (batchButton) {
-      batchButton.disabled = true;
-      batchButton.textContent =
-        'Researching all company rows…';
-    }
-
-    try {
-      show(
-        'V10.5 RESEARCH ALL COMPANIES\n' +
-        'Reading Company Master rows…\n' +
-        'Excel has not been changed.'
-      );
-
-      const snapshot =
-        await readCompanyMasterSnapshot();
-
-      if (token !== requestNumber) return;
-
-      if (!snapshot.companies.length) {
-        show(
-          'No company names found in Company Master column D, row 7 onward.'
-        );
-        return;
-      }
-
-      const items = [];
-
-      for (
-        let i = 0;
-        i < snapshot.companies.length;
-        i++
-      ) {
-        if (token !== requestNumber) return;
-
-        const companyRow = snapshot.companies[i];
-
-        show(
-          'V10.5 RESEARCH ALL COMPANIES\n' +
-
-          'Company ' + (i + 1) +
-          ' of ' + snapshot.companies.length +
-
-          '\nD' + companyRow.row +
-          ': ' + companyRow.company +
-
-          '\nResearching this company. Excel has not been changed.'
-        );
-
-        try {
-          const data = await fetchResearchData(
-            companyRow.company,
-            token
-          );
-
-          if (token !== requestNumber) return;
-
-          const target = getSingleSaveTarget(data);
-
-          items.push({
-            row: companyRow.row,
-            company: companyRow.company,
-            data,
-            target,
-
-            proposal: target
-              ? proposedValues(target)
-              : { proposed: {}, audit: [] },
-
-            approvedColumns: new Set(),
-            columnApprovalButtons: new Map(),
-
-            saved: false,
-            completed: false,
-            saving: false,
-            uncertain: false,
-            requiresResearch: false
-          });
-
-        } catch (error) {
-          items.push({
-            row: companyRow.row,
-            company: companyRow.company,
-            error: errorText(error)
-          });
-        }
-      }
-
-      if (token !== requestNumber) return;
-
-      activeBatch = {
-        token,
-        snapshot,
-        items,
-        placeholderPermissions: new Map()
-      };
-
-      renderBatchReview(activeBatch);
-
-      const targets =
-        items.filter(item => item.target).length;
-
-      const failed =
-        items.filter(item => item.error).length;
-
-      show(
-        'V10.5 INDIVIDUAL APPROVAL REVIEW READY\n' +
-
-        'Company rows: ' +
-        snapshot.companies.length +
-
-        '\nVerified Malaysia save targets: ' +
-        targets +
-
-        '\nResearch errors: ' + failed +
-
-        '\nEach eligible column has its own Approve button. Excel has not been changed.'
-      );
-
-    } catch (error) {
-      if (token === requestNumber) {
-        clearResults();
-
-        show(
-          'BATCH RESEARCH ERROR\n' +
-          errorText(error)
-        );
-      }
-
-    } finally {
-      if (
-        token === requestNumber &&
-        batchButton
-      ) {
-        batchButton.disabled = false;
-
-        batchButton.textContent =
-          'Research all company rows';
-      }
-    }
-  }
-
-  function currentRowCompany(values, row) {
-    return String(
-      values[row - 1]?.[
-        columnNumber('D') - 1
-      ] ?? ''
-    ).trim();
-  }
-
-  const AUDIT_HEADERS = [
-    'Run ID',
-    'Approved UTC',
-    'Company Master Row',
-    'Searched Company',
-    'Malaysia Record ID',
-    'Global Parent Wikidata ID',
-    'Excel Column',
-    'Existing Value',
-    'Proposed Value',
-    'Save Result',
-    'Data Scope',
-    'Research Status',
-    'Source URL',
-    'Research Notes / Reporting Date',
-    'Written UTC',
-    'Column Header'
-  ];
-
-  function excelSafe(value) {
-    if (value === null || value === undefined) {
-      return '';
-    }
-
-    if (
-      typeof value === 'number' &&
-      Number.isFinite(value)
-    ) {
-      return value;
-    }
-
-    const text = String(value);
-
-    // Prevent sourced text from being evaluated as an Excel formula.
-    return /^[\s]*[=+\-@]/.test(text)
-      ? "'" + text
-      : text;
-  }
-
-  function sameCell(a, b) {
+  function same(a, b) {
     return a === b || (a == null && b == null);
   }
-
-  // ============================================================
-  // SAVE ONLY THE APPROVED COLUMNS FOR ONE COMPANY
-  // ============================================================
-
-  async function saveCompany(
-    state,
-    item,
-    button,
-    message
-  ) {
-    if (
-      !state ||
-      state.token !== requestNumber ||
-      state !== activeBatch
-    ) {
-      message.textContent =
-        'This review has expired. Nothing was saved; research again.';
-      return;
+  function safeExcel(value) {
+    if (value === null || value === undefined) return '';
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+    if (typeof value === 'boolean') return value;
+    const text = String(value);
+    return /^\s*[=+\-@]/.test(text) ? "'" + text : text;
+  }
+  function https(url) {
+    try { return new URL(String(url || '')).protocol === 'https:'; }
+    catch { return false; }
+  }
+  function normalizeHeader(value) {
+    return String(value || '').toLowerCase().replace(/\b(code|symbol)\b/g, '')
+      .replace(/[^a-z0-9]/g, '').replace(/s$/, '');
+  }
+  function headerMatches(actual, expected, column) {
+    const normalized = normalizeHeader(actual);
+    return Boolean(normalized && [expected, ...(HEADER_ALIASES[column] || [])]
+      .some(value => value && normalizeHeader(value) === normalized));
+  }
+  function hasReportingDate(item) {
+    const text = [item?.reporting_date, item?.as_of, item?.date, item?.notes]
+      .filter(Boolean).join(' ');
+    return /(?:as of|reporting date|published|dated|\bon\b)\s*:?\s*\+?\d{4}(?:-\d{2})?(?:-\d{2})?/i.test(text);
+  }
+  function evidenceItems(candidate) {
+    const evidence = candidate?.malaysia_profile?.malaysia_evidence;
+    return Array.isArray(evidence) ? evidence : [];
+  }
+  function verifiedMalaysiaTarget(data) {
+    if (!data || data.version !== WORKER_VERSION || !Array.isArray(data.candidates)) return null;
+    const eligible = data.candidates.filter(candidate =>
+      candidate?.save_eligible === true &&
+      candidate?.candidate_role === 'MALAYSIA_SAVE_CANDIDATE');
+    if (eligible.length !== 1) return null;
+    const candidate = eligible[0];
+    const id = candidate.candidate_id;
+    const parent = candidate.global_parent_wikidata_id;
+    const identity = candidate.record_identity || {};
+    const policy = data.save_policy || {};
+    if (!id || data.save_target_candidate_id !== id ||
+        !/^Q\d+$/.test(String(parent || '')) ||
+        !['malaysia_company', 'malaysia_network'].includes(candidate.record_type) ||
+        candidate.verified_malaysia_presence !== true ||
+        identity.record_id !== id || identity.scope !== 'Malaysia' ||
+        identity.type !== candidate.record_type ||
+        identity.parent_wikidata_id !== parent ||
+        identity.parent_reference_id !== 'GLOBAL:' + parent ||
+        candidate.global_parent_candidate_id !== 'GLOBAL:' + parent ||
+        policy.write_from_candidate_id_only !== id ||
+        policy.local_record_only !== true ||
+        policy.reference_only_candidates_must_never_be_saved !== true ||
+        policy.global_parent_is_reference_only !== true ||
+        data.approval_required !== true || data.excel_unchanged !== true ||
+        !evidenceItems(candidate).some(e => e.verified === true && https(e.source_url))) {
+      return null;
     }
-
-    if (
-      !item ||
-      item.saved ||
-      item.completed ||
-      item.uncertain ||
-      item.saving
-    ) {
-      message.textContent =
-        'This company is already saved, completed, or awaiting workbook inspection.';
-      return;
-    }
-
-    if (
-      !item.target ||
-      !validMalaysiaSaveTarget(item.target, item.data)
-    ) {
-      message.textContent =
-        'The Malaysia save candidate did not pass validation. Nothing was saved.';
-      return;
-    }
-
-    const approvedColumns =
-      [...(item.approvedColumns || [])].filter(
-        column => canApproveColumn(state, item, column)
-      );
-
-    if (
-      !approvedColumns.length ||
-      !canWriteCompanyItem(state, item)
-    ) {
-      message.textContent =
-        'No eligible columns have been approved. Approve individual columns first; nothing was saved.';
-
-      button.disabled = true;
-      return;
-    }
-
-    item.saving = true;
-
-    updateColumnApprovalControls(state, item);
-
-    button.textContent =
-      'Saving approved columns for ' +
-      item.company +
-      ' only…';
-
-    message.textContent =
-      'Creating this company’s backup and audit. Only your approved columns will be written; other companies remain untouched.';
-
-    let backupNameConfirmed = null;
-    let auditPrepared = false;
-
-    try {
-      const outcome = await Excel.run(
-        async context => {
-          const sheets =
-            context.workbook.worksheets;
-
-          const source =
-            sheets.getItem(SHEET);
-
-          const used =
-            source.getUsedRangeOrNullObject(true);
-
-          used.load(
-            'isNullObject,rowIndex,rowCount'
-          );
-
-          await context.sync();
-
-          const currentLastRow =
-            used.isNullObject
-              ? HEADER_ROW
-              : Math.max(
-                  HEADER_ROW,
-                  used.rowIndex + used.rowCount
-                );
-
-          const lastRow = Math.max(
-            state.snapshot.lastRow,
-            currentLastRow
-          );
-
-          const current =
-            source.getRange('A1:AP' + lastRow);
-
-          current.load('values,formulas');
-
-          await context.sync();
-
-          if (
-            state.token !== requestNumber ||
-            state !== activeBatch
-          ) {
-            return {
-              blocked:
-                'The review expired before approval. Research again.'
-            };
-          }
-
-          const row = item.row;
-
-          const currentCompany =
-            currentRowCompany(
-              current.values,
-              row
-            );
-
-          if (currentCompany !== item.company) {
-            return {
-              blocked:
-                'Company name in D' +
-                row +
-                ' changed after research. Research this row again.'
-            };
-          }
-
-          if (
-            !validMalaysiaSaveTarget(
-              item.target,
-              item.data
-            )
-          ) {
-            return {
-              blocked:
-                'Malaysia record validation failed for row ' +
-                row +
-                '.'
-            };
-          }
-
-          // Validate only the headers for columns
-          // the user explicitly approved.
-
-          for (const column of approvedColumns) {
-            const proposal =
-              item.proposal.proposed[column];
-
-            const expected =
-              proposal?.header ||
-              item.data.column_headers?.[column] ||
-              '';
-
-            const actual =
-              current.values[HEADER_ROW - 1]?.[
-                columnNumber(column) - 1
-              ];
-
-            if (
-              !expected ||
-              !headerMatches(actual, expected, column)
-            ) {
-              return {
-                blocked:
-                  'Header mismatch at ' +
-                  column +
-                  HEADER_ROW +
-                  '. No cells were written for ' +
-                  item.company +
-                  '.'
-              };
-            }
-          }
-
-          // Recheck this company's row.
-          // Other company rows are not part of this approval.
-
-          const fieldsToCheck = new Set([
-            ...WRITABLE_COLUMNS,
-            NOTE_COLUMN
-          ]);
-
-          for (const column of fieldsToCheck) {
-            const index =
-              columnNumber(column) - 1;
-
-            if (
-              !sameCell(
-                current.values[row - 1]?.[index],
-                state.snapshot.values[row - 1]?.[index]
-              ) ||
-
-              !sameCell(
-                current.formulas[row - 1]?.[index],
-                state.snapshot.formulas[row - 1]?.[index]
-              )
-            ) {
-              return {
-                blocked:
-                  column +
-                  row +
-                  ' changed after preview. Research this company again; nothing was written.'
-              };
-            }
-          }
-
-          // Check the audit worksheet.
-
-          const auditExisting =
-            sheets.getItemOrNullObject(AUDIT_SHEET);
-
-          auditExisting.load('isNullObject');
-
-          await context.sync();
-
-          let auditNextRow = 2;
-
-          let writeAuditHeaders =
-            auditExisting.isNullObject;
-
-          if (!auditExisting.isNullObject) {
-            const auditUsed =
-              auditExisting.getUsedRangeOrNullObject(true);
-
-            auditUsed.load(
-              'isNullObject,rowIndex,rowCount'
-            );
-
-            await context.sync();
-
-            if (auditUsed.isNullObject) {
-              writeAuditHeaders = true;
-              auditNextRow = 2;
-
-            } else {
-              const first =
-                auditExisting.getRange('A1:P1');
-
-              first.load('values,formulas');
-
-              await context.sync();
-
-              const validHeaders =
-                AUDIT_HEADERS.every(
-                  (header, index) =>
-                    first.values[0][index] === header &&
-                    !(
-                      typeof first.formulas[0][index] === 'string' &&
-                      first.formulas[0][index].startsWith('=')
-                    )
-                );
-
-              if (!validHeaders) {
-                return {
-                  blocked:
-                    'Existing "' +
-                    AUDIT_SHEET +
-                    '" has different headers. No Company Master cells were written.'
-                };
-              }
-
-              auditNextRow = Math.max(
-                2,
-                auditUsed.rowIndex +
-                auditUsed.rowCount +
-                1
-              );
-            }
-          }
-
-          const now = new Date().toISOString();
-
-          const runId =
-            'V105-' +
-            now.replace(/[^0-9]/g, '') +
-            '-R' +
-            row;
-
-          const rowValues =
-            current.values[row - 1] || [];
-
-          const rowFormulas =
-            current.formulas[row - 1] || [];
-
-          const research = new Map(
-            (item.target.column_research || [])
-              .map(value => [value.column, value])
-          );
-
-          const permission =
-            state.placeholderPermissions
-              .get(row)?.checked === true;
-
-          const writes = [];
-          const skipped = [];
-          const auditRecords = [];
-
-          for (const column of SELECTED_COLUMNS) {
-            const index =
-              columnNumber(column) - 1;
-
-            const oldValue = rowValues[index];
-            const oldFormula = rowFormulas[index];
-
-            const hasFormula =
-              typeof oldFormula === 'string' &&
-              oldFormula.startsWith('=');
-
-            const empty =
-              (
-                oldValue === null ||
-                oldValue === undefined ||
-                oldValue === ''
-              ) && !hasFormula;
-
-            const exactPlaceholder =
-              column === 'J' &&
-              permission &&
-              !hasFormula &&
-              oldValue === PLACEHOLDER;
-
-            const proposed =
-              item.proposal.proposed[column];
-
-            const raw =
-              research.get(column) || {};
-
-            let disposition;
-
-            if (!proposed) {
-              disposition = 'NOT_PROPOSED';
-
-            } else if (
-              !approvedColumns.includes(column)
-            ) {
-              disposition = 'NOT_APPROVED';
-
-            } else if (
-              !empty &&
-              !exactPlaceholder
-            ) {
-              disposition = 'SKIPPED_EXISTING';
-
-              skipped.push(column + row);
-
-            } else {
-              disposition = 'PREPARED_NOT_CONFIRMED';
-
-              writes.push({
-                row,
-                column,
-                value: proposed.value
-              });
-            }
-
-            auditRecords.push({
-              disposition,
-
-              cells: [
-                runId,
-                now,
-                row,
-                item.company,
-                item.target.candidate_id,
-                item.target.global_parent_wikidata_id,
-                column,
-
-                hasFormula
-                  ? '[EXISTING FORMULA PROTECTED]'
-                  : (oldValue ?? ''),
-
-                proposed
-                  ? proposed.value
-                  : (raw.value ?? ''),
-
-                disposition,
-
-                proposed?.scope ||
-                  raw.scope ||
-                  '',
-
-                proposed?.status ||
-                  raw.status ||
-                  '',
-
-                proposed?.source_url ||
-                  raw.source_url ||
-                  '',
-
-                proposed?.notes ||
-                  raw.notes ||
-                  '',
-
-                '',
-
-                raw.header ||
-                  proposed?.header ||
-                  ''
-
-              ].map(excelSafe)
-            });
-          }
-
-          // AP is optional.
-          // Existing AP notes and formulas are preserved.
-          // Only approved column values are included in the new note.
-
-          const apIndex =
-            columnNumber(NOTE_COLUMN) - 1;
-
-          const apOld = rowValues[apIndex];
-          const apFormula = rowFormulas[apIndex];
-
-          const apEmpty =
-            (
-              apOld === null ||
-              apOld === undefined ||
-              apOld === ''
-            ) &&
-            !(
-              typeof apFormula === 'string' &&
-              apFormula.startsWith('=')
-            );
-
-          if (writes.length > 0 && apEmpty) {
-            const approvedProposed =
-              Object.fromEntries(
-                approvedColumns
-                  .filter(column =>
-                    item.proposal.proposed[column]
-                  )
-                  .map(column => [
-                    column,
-                    item.proposal.proposed[column]
-                  ])
-              );
-
-            const approvedAudit =
-              item.proposal.audit.filter(record =>
-                approvedColumns.includes(record.column)
-              );
-
-            writes.push({
-              row,
-              column: NOTE_COLUMN,
-
-              value: buildResearchNote(
-                item.company,
-                item.target,
-                approvedProposed,
-                approvedAudit
-              )
-            });
-
-          } else if (!apEmpty) {
-            skipped.push(NOTE_COLUMN + row);
-          }
-
-          if (auditRecords.length > 30000) {
-            return {
-              blocked:
-                'Audit would exceed the safe batch size. Nothing was written.'
-            };
-          }
-
-          if (!writes.length) {
-            return {
-              noChanges: true,
-              skipped
-            };
-          }
-
-          // One backup for THIS company's separate save action.
-
-          const stamp =
-            now.replace(/\D/g, '').slice(0, 17);
-
-          const backupName =
-            'CM105_' + row + '_' + stamp;
-
-          if (backupName.length > 31) {
-            return {
-              blocked:
-                'Could not create a valid backup worksheet name. Nothing was written.'
-            };
-          }
-
-          const collision =
-            sheets.getItemOrNullObject(backupName);
-
-          collision.load('isNullObject');
-
-          await context.sync();
-
-          if (!collision.isNullObject) {
-            return {
-              blocked:
-                'This company’s backup name already exists. Nothing was written; run research again.'
-            };
-          }
-
-          const backup = source.copy(
-            Excel.WorksheetPositionType.after,
-            source
-          );
-
-          backup.name = backupName;
-
-          await context.sync();
-
-          backupNameConfirmed = backupName;
-
-          // Create/append only this company's audit rows.
-
-          const audit = auditExisting.isNullObject
-            ? sheets.add(AUDIT_SHEET)
-            : sheets.getItem(AUDIT_SHEET);
-
-          if (writeAuditHeaders) {
-            audit.getRange('A1:P1').values =
-              [AUDIT_HEADERS];
-          }
-
-          const lastAuditRow =
-            auditNextRow + auditRecords.length - 1;
-
-          audit.getRange(
-            'A' + auditNextRow +
-            ':P' + lastAuditRow
-          ).values =
-            auditRecords.map(record => record.cells);
-
-          await context.sync();
-
-          auditPrepared = true;
-
-          // Critical isolation:
-          // every write below uses this one approved row.
-
-          for (const write of writes) {
-            if (write.row !== row) {
-              throw new Error(
-                'Safety check failed: attempted write outside approved company row.'
-              );
-            }
-
-            source.getRange(
-              write.column + write.row
-            ).values = [
-              [excelSafe(write.value)]
-            ];
-          }
-
-          await context.sync();
-
-          const savedAt =
-            new Date().toISOString();
-
-          audit.getRange(
-            'J' + auditNextRow +
-            ':J' + lastAuditRow
-          ).values =
-            auditRecords.map(record => [
-              record.disposition === 'PREPARED_NOT_CONFIRMED'
-                ? 'SAVED'
-                : record.disposition
-            ]);
-
-          audit.getRange(
-            'O' + auditNextRow +
-            ':O' + lastAuditRow
-          ).values =
-            auditRecords.map(record => [
-              record.disposition === 'PREPARED_NOT_CONFIRMED'
-                ? savedAt
-                : ''
-            ]);
-
-          await context.sync();
-
-          return {
-            saved: writes.map(
-              write => write.column + write.row
-            ),
-
-            skipped,
-            backupName,
-            auditRows: auditRecords.length
-          };
-        }
-      );
-
-      if (outcome.blocked) {
-        item.saving = false;
-        item.completed = true;
-        item.requiresResearch = true;
-
-        show(
-          'SAVE BLOCKED — ' +
-          item.company +
-          '\n' +
-          outcome.blocked
-        );
-
-        message.textContent =
-          outcome.blocked +
-          ' Run Research all company rows again before trying this company.';
-
-        button.disabled = true;
-
-        button.textContent =
-          'Re-research required — ' + item.company;
-
-        updateColumnApprovalControls(state, item);
-        updateIndividualApprovalStatus(state);
-
-        return;
+    return candidate;
+  }
+  function buildProposals(candidate) {
+    const raw = new Map();
+    const proposed = new Map();
+    for (const record of (candidate.column_research || [])) {
+      if (!record || !COLUMNS.includes(record.column)) continue;
+      raw.set(record.column, record);
+      const v = record.value;
+      const validValue = typeof v === 'number' && Number.isFinite(v) ||
+        typeof v === 'string' && Boolean(v.trim());
+      const scope = GLOBAL.has(record.column) ? 'global_group_metric' : 'malaysia_company';
+      if (WRITABLE.has(record.column) && validValue && record.scope === scope &&
+          STATUSES.has(record.status) && https(record.source_url) &&
+          (!DATED.has(record.column) || hasReportingDate(record))) {
+        proposed.set(record.column, record);
       }
-
-      if (outcome.noChanges) {
-        item.saving = false;
-        item.completed = true;
-
-        button.disabled = true;
-
-        button.textContent =
-          'No changes needed — ' + item.company;
-
-        message.textContent =
-          'No approved fields could be written. Existing values and formulas were preserved. No backup or audit entry was created.';
-
-        updateColumnApprovalControls(state, item);
-        updateIndividualApprovalStatus(state);
-
-        return;
-      }
-
-      item.saving = false;
-      item.saved = true;
-
-      button.disabled = true;
-
-      button.textContent =
-        'Saved ✓ — ' + item.company;
-
-      message.textContent =
-        'Saved only ' +
-        item.company +
-        ' (row ' +
-        item.row +
-        '). Backup: ' +
-        outcome.backupName +
-        '. Audit rows: ' +
-        outcome.auditRows +
-        '. Cells saved: ' +
-        outcome.saved.join(', ') +
-        '. Existing cells skipped: ' +
-        (outcome.skipped.join(', ') || 'none') +
-        '.';
-
-      updateColumnApprovalControls(state, item);
-
-      show(
-        'INDIVIDUAL SAVE COMPLETE\n' +
-
-        'Company: ' +
-        item.company +
-
-        '\nCompany Master row: ' +
-        item.row +
-
-        '\nBackup: ' +
-        outcome.backupName +
-
-        '\nAudit: ' +
-        AUDIT_SHEET +
-        ' (' +
-        outcome.auditRows +
-        ' records)' +
-
-        '\nSaved cells: ' +
-        outcome.saved.join(', ') +
-
-        '\nSkipped existing cells: ' +
-        (outcome.skipped.join(', ') || 'none') +
-
-        '\nAll other company rows remain pending and unchanged.'
-      );
-
-      updateIndividualApprovalStatus(state);
-
-    } catch (error) {
-      item.saving = false;
-      item.uncertain = true;
-
-      button.disabled = true;
-
-      button.textContent =
-        'Check workbook before retrying — ' +
-        item.company;
-
-      const detail =
-        'Save outcome is not confirmed for ' +
-        item.company +
-        '. ' +
-
-        (
-          backupNameConfirmed
-            ? 'Backup exists: ' +
-              backupNameConfirmed +
-              '. '
-            : ''
-        ) +
-
-        (
-          auditPrepared
-            ? 'Audit was prepared; check for PREPARED_NOT_CONFIRMED entries.'
-            : 'Audit preparation was not confirmed.'
-        ) +
-
-        ' Inspect this company row, its backup and Company Research Audit before retrying. ' +
-        errorText(error);
-
-      show(
-        'SAVE NOT CONFIRMED\n' +
-        detail
-      );
-
-      message.textContent = detail;
-
-      updateColumnApprovalControls(state, item);
-      updateIndividualApprovalStatus(state);
+    }
+    return { raw, proposed };
+  }
+  function rowValues(state, item) {
+    return state.snapshot.values[item.row - 1] || [];
+  }
+  function rowFormulas(state, item) {
+    return state.snapshot.formulas[item.row - 1] || [];
+  }
+  function canApprove(state, item, column) {
+    if (!state || !item.target || item.saved || item.saving ||
+        item.blocked || item.uncertain || !item.proposal.proposed.has(column)) return false;
+    const index = indexOfColumn(column);
+    const value = rowValues(state, item)[index];
+    const formula = rowFormulas(state, item)[index];
+    if (typeof formula === 'string' && formula.startsWith('=')) return false;
+    if (value === '' || value === null || value === undefined) return true;
+    return column === 'J' && value === PLACEHOLDER && item.allowJ === true;
+  }
+  function approvedColumns(state, item) {
+    return [...item.approved].filter(column => canApprove(state, item, column));
+  }
+  function refreshButtons(state, item) {
+    for (const [column, button] of item.buttons) {
+      const selected = item.approved.has(column);
+      button.textContent = selected ? 'Approved ✓ (undo)' : 'Approve';
+      button.disabled = !canApprove(state, item, column);
+      button.style.background = selected ? '#e4f3e9' : '#137f5b';
+      button.style.color = selected ? '#126142' : '#ffffff';
+      button.style.cursor = button.disabled ? 'not-allowed' : 'pointer';
+    }
+    if (!item.saveButton) return;
+    const count = approvedColumns(state, item).length;
+    const enabled = count > 0 && !item.saved && !item.saving && !item.blocked && !item.uncertain;
+    item.saveButton.disabled = !enabled;
+    item.saveButton.style.background = enabled ? '#137f5b' : '#9ca3af';
+    item.saveButton.style.color = '#ffffff';
+    item.saveButton.style.cursor = enabled ? 'pointer' : 'not-allowed';
+    item.saveButton.style.opacity = enabled ? '1' : '0.75';
+    item.saveButton.setAttribute('aria-disabled', String(!enabled));
+    if (item.saved || item.uncertain || item.blocked || item.saving) return;
+    item.saveMessage.textContent = count
+      ? count + ' column(s) approved. Nothing has been written. Save only when ready.'
+      : 'No approved columns yet. Approve an eligible column above first.';
+  }
+  function showProfiles(card, target) {
+    const p = target.malaysia_profile || {};
+    const g = target.global_profile || {};
+    field(card, 'Malaysia save record', target.name);
+    field(card, 'Malaysia record ID', target.candidate_id);
+    field(card, 'Global parent — reference only', target.global_parent_name);
+    field(card, 'Malaysia presence', p.malaysia_presence_status);
+    field(card, 'Malaysia company/network', p.malaysia_company_name);
+    field(card, 'Malaysia head office', p.malaysia_headquarters);
+    field(card, 'Malaysia main office address', p.malaysia_office_address);
+    field(card, 'Malaysia website', p.malaysia_website, p.malaysia_website);
+    field(card, 'Malaysia careers', p.malaysia_careers_url, p.malaysia_careers_url);
+    field(card, 'Malaysia industry', p.industry_local);
+    field(card, 'Malaysia workforce — display only until dated', p.employees_my);
+    field(card, 'Global headquarters — reference only', g.headquarters);
+    field(card, 'Global industry — reference only', g.industry);
+    field(card, 'Global websites — reference only', g.websites);
+    for (const e of evidenceItems(target)) {
+      add(card, 'p', (e.verified === true ? 'Verified evidence: ' : 'Review evidence: ') +
+        String(e.note || e.type || 'Source'));
+      link(card, 'View source', e.source_url);
     }
   }
-
-  // ============================================================
-  // EXCEL CHANGE DETECTION
-  // ============================================================
-
-  function onChanged(event) {
-    const location =
-      changedRow(event.address);
-
-    if (!location) return;
-
-    ++requestNumber;
-
-    activeBatch = null;
-
-    clearResults();
-
-    if (location.multiple) {
-      show(
-        'Company names changed in multiple rows. Click Research all company rows to prepare a fresh consolidated review.'
-      );
-
+  function showColumn(card, state, item, column) {
+    const record = item.proposal.raw.get(column) || {};
+    const proposal = item.proposal.proposed.get(column);
+    // Display the exact existing Excel header; never change or invent one.
+    const block = panel(card, column + ' — ' +
+      display(state.snapshot.values[HEADER_ROW - 1]?.[indexOfColumn(column)]));
+    if (GLOBAL.has(column)) add(block, 'p', 'GLOBAL PARENT metric, not Malaysia entity data.');
+    const old = rowValues(state, item)[indexOfColumn(column)];
+    const formula = rowFormulas(state, item)[indexOfColumn(column)];
+    if (proposal) {
+      field(block, 'Research proposal', proposal.value, proposal.source_url);
+      add(block, 'p', 'Status: ' + proposal.status);
+      if (proposal.notes) add(block, 'p', proposal.notes);
     } else {
-      show(
-        'D' +
-        location.row +
-        ' changed. Click Research all company rows to refresh the consolidated review. No Excel cells were changed by research.'
-      );
+      let reason = 'No supported Worker value; nothing can be approved.';
+      if (!WRITABLE.has(column)) reason = 'Protected column — no Approve button.';
+      else if (DATED.has(column) && record.value != null && !hasReportingDate(record)) {
+        reason = 'Reporting date missing; cannot approve.';
+      } else if (record.value != null && record.value !== '' && !https(record.source_url)) {
+        reason = 'No HTTPS evidence source; cannot approve.';
+      }
+      add(block, 'p', reason);
+      if (record.notes) add(block, 'p', record.notes);
+      link(block, 'Research source', record.source_url);
     }
+    if (old !== '' && old != null) add(block, 'p', 'Existing Excel value (preserved): ' + display(old));
+    if (typeof formula === 'string' && formula.startsWith('=')) {
+      add(block, 'p', 'Existing formula (protected).');
+    }
+    const jPlaceholder = column === 'J' && proposal && old === PLACEHOLDER &&
+      !(typeof formula === 'string' && formula.startsWith('='));
+    if (jPlaceholder) {
+      const label = add(block, 'label');
+      const checkbox = add(label, 'input');
+      checkbox.type = 'checkbox';
+      checkbox.checked = false;
+      add(label, 'span', ' Permit replacing only [verify office address] in J' + item.row);
+      checkbox.addEventListener('change', () => {
+        item.allowJ = checkbox.checked;
+        if (!checkbox.checked) item.approved.delete('J');
+        refreshButtons(state, item);
+      });
+    }
+    // Do NOT show a misleading Approve button on protected, unavailable or
+    // already-filled cells. J gets a button only for its exact placeholder.
+    const blank = (old === '' || old == null) &&
+      !(typeof formula === 'string' && formula.startsWith('='));
+    if (!proposal || !WRITABLE.has(column) || (!blank && !jPlaceholder)) return;
+    const button = add(block, 'button', 'Approve');
+    button.type = 'button';
+    button.style.padding = '9px 14px';
+    button.style.border = '0';
+    button.style.borderRadius = '6px';
+    button.style.fontWeight = '600';
+    button.addEventListener('click', () => {
+      if (!canApprove(state, item, column)) return;
+      if (item.approved.has(column)) item.approved.delete(column);
+      else item.approved.add(column);
+      refreshButtons(state, item); // No Excel.run or writes here.
+    });
+    item.buttons.set(column, button);
   }
-
-  // ============================================================
-  // INITIALIZATION
-  // ============================================================
-
-  async function initialize() {
-    if (active) {
-      ensureBatchButton();
-
-      show(
-        'V10.5 READY\n' +
-        'Research all company rows, approve columns individually, then save approved columns separately for one company.'
-      );
-
+  function renderReview(state) {
+    if (!results) return;
+    results.replaceChildren();
+    add(results, 'h2', 'Individual column approvals — V' + VERSION);
+    add(results, 'p', 'Research does not change Excel. Approve fields one at a time, then use the separate Save button for that ONE company.');
+    add(results, 'p', 'Protected A/B/C/D/AE are display-only. Missing Fortune rank, visa, rental and commute data need verified Worker research.');
+    state.items.forEach(item => {
+      const card = panel(results, 'D' + item.row + ' — ' + item.name);
+      if (item.error) { add(card, 'p', 'Research failed: ' + item.error); return; }
+      if (!item.target) {
+        add(card, 'p', 'No unique verified Malaysia save candidate. Nothing may be written for this row.');
+        return;
+      }
+      showProfiles(card, item.target);
+      add(card, 'h4', 'Review the existing 23 Company Master columns');
+      COLUMNS.forEach(column => showColumn(card, state, item, column));
+      const ap = rowValues(state, item)[indexOfColumn('AP')];
+      add(card, 'p', ap == null || ap === ''
+        ? 'AP is blank; a source note may be added on save.'
+        : 'AP already contains information and will never be overwritten.');
+      const saveBox = panel(card, 'Save for ' + item.name + ' ONLY');
+      add(saveBox, 'p', 'Saving first copies the full Company Master worksheet, then appends audit entries before writing approved values.');
+      const button = add(saveBox, 'button', 'Save approved columns — ' + item.name);
+      button.type = 'button';
+      button.style.width = '100%';
+      button.style.padding = '13px';
+      button.style.border = '0';
+      button.style.borderRadius = '6px';
+      button.style.fontWeight = '600';
+      item.saveButton = button;
+      item.saveMessage = add(saveBox, 'p');
+      button.addEventListener('click', () => saveCompany(state, item));
+      refreshButtons(state, item);
+    });
+  }
+  function ensureResearchButton() {
+    if (researchButton || !results?.parentElement) return;
+    researchButton = document.createElement('button');
+    researchButton.type = 'button';
+    researchButton.textContent = 'Research all company rows';
+    researchButton.style.display = 'block';
+    researchButton.style.width = '100%';
+    researchButton.style.margin = '10px 0';
+    researchButton.style.padding = '12px';
+    researchButton.style.background = '#137f5b';
+    researchButton.style.color = 'white';
+    researchButton.style.border = '0';
+    researchButton.style.borderRadius = '6px';
+    researchButton.addEventListener('click', researchAll);
+    results.parentElement.insertBefore(researchButton, results);
+  }
+  async function snapshot() {
+    return Excel.run(async context => {
+      const sheet = context.workbook.worksheets.getItem(MASTER);
+      const used = sheet.getUsedRangeOrNullObject(true);
+      used.load('isNullObject,rowIndex,rowCount');
+      await context.sync();
+      const lastRow = used.isNullObject ? HEADER_ROW :
+        Math.max(HEADER_ROW, used.rowIndex + used.rowCount);
+      const range = sheet.getRange('A1:AP' + lastRow);
+      range.load('values,formulas');
+      await context.sync();
+      const companies = [];
+      for (let row = FIRST_ROW; row <= lastRow; row++) {
+        const name = String(range.values[row - 1]?.[indexOfColumn('D')] ?? '').trim();
+        if (name) companies.push({ row, name });
+      }
+      return { values: range.values, formulas: range.formulas, companies, lastRow };
+    });
+  }
+  async function fetchResearch(name, token) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 45000);
+    try {
+      const response = await fetch(WORKER + '/research?company=' +
+        encodeURIComponent(name), { headers: { Accept: 'application/json' },
+          cache: 'no-store', signal: controller.signal });
+      if (!response.ok) throw Error('Research HTTP ' + response.status);
+      const data = await response.json();
+      if (token !== generation) return null;
+      if (data.version !== WORKER_VERSION) throw Error('Worker version must be 10.3.');
+      if (data.status !== 'candidates_for_review') throw Error(data.message || 'No review candidates.');
+      return data;
+    } finally { clearTimeout(timeout); }
+  }
+  async function researchAll() {
+    const token = ++generation;
+    currentReview = null;
+    if (results) results.replaceChildren();
+    if (researchButton) researchButton.disabled = true;
+    try {
+      say('V' + VERSION + ': Reading Company Master. Research never writes Excel.');
+      const original = await snapshot();
+      if (token !== generation) return;
+      if (!original.companies.length) { say('No companies in column D, row 7 onward.'); return; }
+      const items = [];
+      for (const company of original.companies) {
+        if (token !== generation) return;
+        say('Researching D' + company.row + ' — ' + company.name + '. Excel unchanged.');
+        const item = { row: company.row, name: company.name, approved: new Set(),
+          buttons: new Map(), allowJ: false, saved: false, saving: false,
+          uncertain: false, blocked: false };
+        try {
+          const data = await fetchResearch(company.name, token);
+          if (token !== generation) return;
+          item.data = data;
+          item.target = verifiedMalaysiaTarget(data);
+          item.proposal = item.target ? buildProposals(item.target) :
+            { raw: new Map(), proposed: new Map() };
+        } catch (error) { item.error = String(error?.message || error); }
+        items.push(item);
+      }
+      currentReview = { token, snapshot: original, items };
+      renderReview(currentReview);
+      say('V' + VERSION + ' REVIEW READY: ' + items.length +
+        ' companies researched. Approve fields individually. Excel unchanged.');
+    } catch (error) {
+      say('RESEARCH ERROR: ' + String(error?.message || error));
+    } finally { if (token === generation && researchButton) researchButton.disabled = false; }
+  }
+  function noteFor(item, selected) {
+    const lines = [
+      'MALAYSIA RESEARCH V' + VERSION,
+      'Company Master row: ' + item.row,
+      'Company: ' + item.name,
+      'Malaysia record: ' + item.target.name + ' (' + item.target.candidate_id + ')',
+      'Global parent: ' + String(item.target.global_parent_name || ''),
+      'ONLY THESE FIELDS WERE APPROVED:'
+    ];
+    selected.forEach(column => {
+      const p = item.proposal.proposed.get(column);
+      lines.push(column + ' — ' + String(p.header || '') + ': ' + String(p.value) +
+        ' | ' + (GLOBAL.has(column) ? 'GLOBAL PARENT' : 'MALAYSIA') +
+        ' | ' + p.status + ' | ' + String(p.notes || '') + ' | ' + p.source_url);
+    });
+    lines.push('Unapproved columns and existing data were not overwritten.');
+    return lines.join('\n').slice(0, 30000);
+  }
+  async function saveCompany(state, item) {
+    if (state !== currentReview || state.token !== generation || !item.target ||
+        item.saved || item.saving || item.uncertain || item.blocked) return;
+    if (verifiedMalaysiaTarget(item.data) !== item.target) {
+      item.saveMessage.textContent = 'Malaysia candidate validation failed. No changes.';
       return;
     }
-
-    if (starting) return;
-
-    starting = true;
-
-    show('V10.5: Connecting to Excel...');
-
+    const selected = approvedColumns(state, item);
+    if (!selected.length) { refreshButtons(state, item); return; }
+    item.saving = true;
+    refreshButtons(state, item);
+    item.saveMessage.textContent = 'Checking this company, creating backup and audit…';
+    let backupConfirmed = null;
+    let auditConfirmed = false;
+    try {
+      const result = await Excel.run(async context => {
+        const sheets = context.workbook.worksheets;
+        const master = sheets.getItem(MASTER);
+        const current = master.getRange('A6:AP' + item.row);
+        current.load('values,formulas');
+        await context.sync();
+        if (state !== currentReview || state.token !== generation) {
+          return { blocked: 'Review expired. Research again.' };
+        }
+        const headers = current.values[0];
+        const values = current.values[item.row - HEADER_ROW];
+        const formulas = current.formulas[item.row - HEADER_ROW];
+        if (String(values[indexOfColumn('D')] ?? '').trim() !== item.name) {
+          return { blocked: 'Company name changed. Research again.' };
+        }
+        // Recheck this company's cells only. Do not invalidate due to other rows.
+        for (const column of [...WRITABLE, 'AP']) {
+          const i = indexOfColumn(column);
+          if (!same(values[i], rowValues(state, item)[i]) ||
+              !same(formulas[i], rowFormulas(state, item)[i])) {
+            return { blocked: column + item.row + ' changed since review. Research again.' };
+          }
+        }
+        const writes = [];
+        for (const column of selected) {
+          const proposal = item.proposal.proposed.get(column);
+          if (!proposal || !WRITABLE.has(column)) return { blocked: 'Unverified field ' + column };
+          const expected = proposal.header || item.data.column_headers?.[column] || '';
+          if (!expected || !headerMatches(headers[indexOfColumn(column)], expected, column) ||
+              !same(headers[indexOfColumn(column)], state.snapshot.values[HEADER_ROW - 1]?.[indexOfColumn(column)])) {
+            return { blocked: 'Header mismatch at ' + column + HEADER_ROW + '. No changes.' };
+          }
+          const i = indexOfColumn(column);
+          const formula = formulas[i];
+          const value = values[i];
+          const blank = value === '' || value == null;
+          const allowPlaceholder = column === 'J' && item.allowJ && value === PLACEHOLDER;
+          if (typeof formula === 'string' && formula.startsWith('=') ||
+              (!blank && !allowPlaceholder)) {
+            return { blocked: 'Existing value/formula in ' + column + item.row + '. No changes.' };
+          }
+          writes.push({ column, value: proposal.value });
+        }
+        if (!writes.length) return { blocked: 'No approved fields to save.' };
+        const existingAudit = sheets.getItemOrNullObject(AUDIT);
+        existingAudit.load('isNullObject');
+        await context.sync();
+        let auditStart = 2;
+        let writeHeaders = existingAudit.isNullObject;
+        if (!existingAudit.isNullObject) {
+          const usedAudit = existingAudit.getUsedRangeOrNullObject(true);
+          usedAudit.load('isNullObject,rowIndex,rowCount');
+          await context.sync();
+          if (usedAudit.isNullObject) {
+            writeHeaders = true;
+          } else {
+            const auditHeader = existingAudit.getRange('A1:P1');
+            auditHeader.load('values,formulas');
+            await context.sync();
+            if (!AUDIT_HEADERS.every((h, i) => auditHeader.values[0][i] === h &&
+                !(typeof auditHeader.formulas[0][i] === 'string' &&
+                  auditHeader.formulas[0][i].startsWith('=')))) {
+              return { blocked: 'Company Research Audit headers differ. Nothing written.' };
+            }
+            auditStart = Math.max(2, usedAudit.rowIndex + usedAudit.rowCount + 1);
+          }
+        }
+        const time = new Date().toISOString();
+        const runId = 'V1051-' + time.replace(/\D/g, '') + '-R' + item.row;
+        const selectedSet = new Set(selected);
+        const auditRows = COLUMNS.map(column => {
+          const p = item.proposal.proposed.get(column);
+          const raw = item.proposal.raw.get(column) || {};
+          const i = indexOfColumn(column);
+          const old = typeof formulas[i] === 'string' && formulas[i].startsWith('=')
+            ? '[EXISTING FORMULA PROTECTED]' : values[i] ?? '';
+          return [runId, time, item.row, item.name, item.target.candidate_id,
+            item.target.global_parent_wikidata_id, column, old,
+            p?.value ?? raw.value ?? '',
+            selectedSet.has(column) ? 'PREPARED_NOT_CONFIRMED' : 'NOT_APPROVED',
+            p?.scope ?? raw.scope ?? '', p?.status ?? raw.status ?? '',
+            p?.source_url ?? raw.source_url ?? '', p?.notes ?? raw.notes ?? '',
+            '', p?.header ?? raw.header ?? ''].map(safeExcel);
+        });
+        // Copy the ENTIRE worksheet before writing audit or Company Master values.
+        const backupName = 'CM51_R' + item.row + '_' + Date.now().toString(36);
+        if (backupName.length > 31) return { blocked: 'Backup name too long.' };
+        const existingBackup = sheets.getItemOrNullObject(backupName);
+        existingBackup.load('isNullObject');
+        await context.sync();
+        if (!existingBackup.isNullObject) return { blocked: 'Backup name already exists.' };
+        const copy = master.copy(Excel.WorksheetPositionType.after, master);
+        copy.name = backupName;
+        await context.sync();
+        backupConfirmed = backupName;
+        // Audit entries must be committed BEFORE Company Master values are written.
+        const audit = existingAudit.isNullObject ? sheets.add(AUDIT) : sheets.getItem(AUDIT);
+        if (writeHeaders) audit.getRange('A1:P1').values = [AUDIT_HEADERS];
+        const auditEnd = auditStart + auditRows.length - 1;
+        audit.getRange('A' + auditStart + ':P' + auditEnd).values = auditRows;
+        await context.sync();
+        auditConfirmed = true;
+        // Write values in this ONE row only, without touching number formats.
+        for (const write of writes) {
+          master.getRange(write.column + item.row).values = [[safeExcel(write.value)]];
+        }
+        const ap = indexOfColumn('AP');
+        if ((values[ap] == null || values[ap] === '') &&
+            !(typeof formulas[ap] === 'string' && formulas[ap].startsWith('='))) {
+          master.getRange('AP' + item.row).values = [[safeExcel(noteFor(item, selected))]];
+        }
+        await context.sync();
+        // Update only the audit records that belong to this one approval.
+        const confirmedAt = new Date().toISOString();
+        audit.getRange('J' + auditStart + ':J' + auditEnd).values = COLUMNS.map(column => [
+          selectedSet.has(column) ? 'SAVED' : 'NOT_APPROVED'
+        ]);
+        audit.getRange('O' + auditStart + ':O' + auditEnd).values = COLUMNS.map(column => [
+          selectedSet.has(column) ? confirmedAt : ''
+        ]);
+        await context.sync();
+        return { backupName, saved: selected.map(column => column + item.row) };
+      });
+      if (result.blocked) {
+        item.blocked = true;
+        item.saveButton.textContent = 'Re-research required — ' + item.name;
+        item.saveMessage.textContent = result.blocked + ' No Excel values were written.';
+        say('SAVE BLOCKED: ' + result.blocked);
+      } else {
+        item.saved = true;
+        item.saveButton.textContent = 'Saved ✓ — ' + item.name;
+        item.saveMessage.textContent = 'Saved only ' + item.name + ': ' +
+          result.saved.join(', ') + '. Backup: ' + result.backupName +
+          '. Audit: ' + AUDIT + '. Other companies were not saved.';
+        say('V' + VERSION + ' SAVED: ' + item.name + '. ' + result.saved.join(', '));
+      }
+    } catch (error) {
+      item.uncertain = true;
+      item.saveButton.textContent = 'Inspect workbook before retrying';
+      item.saveMessage.textContent = 'SAVE NOT CONFIRMED. ' +
+        String(error?.message || error) + '. ' +
+        (backupConfirmed ? 'Backup: ' + backupConfirmed + '. ' : '') +
+        (auditConfirmed ? 'Audit was prepared. ' : '') +
+        'Check Company Master and the audit; do not retry automatically.';
+      say('SAVE NOT CONFIRMED — check workbook before retrying.');
+    } finally {
+      item.saving = false;
+      refreshButtons(state, item);
+    }
+  }
+  function onChanged(event) {
+    const address = String(event?.address || '').split('!').pop()
+      .replace(/\$/g, '').toUpperCase();
+    const match = /^([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?$/.exec(address);
+    if (!match) return;
+    const firstCol = indexOfColumn(match[1]);
+    const lastCol = indexOfColumn(match[3] || match[1]);
+    const lastRow = Number(match[4] || match[2]);
+    if (firstCol <= indexOfColumn('D') && lastCol >= indexOfColumn('D') &&
+        lastRow >= FIRST_ROW) {
+      ++generation;
+      currentReview = null;
+      if (results) results.replaceChildren();
+      say('Company names changed. Research again before approving or saving.');
+    }
+  }
+  async function initialize() {
+    if (initialized) {
+      ensureResearchButton();
+      say('V' + VERSION + ' READY — individual column Approve buttons; separate company Save.');
+      return;
+    }
+    if (initializing) return;
+    initializing = true;
+    say('V' + VERSION + ' connecting to Excel…');
     try {
       await Office.onReady();
-
-      if (typeof Excel === 'undefined') {
-        throw new Error(
-          'Excel JavaScript API unavailable. Open this add-in inside Excel.'
-        );
-      }
-
+      if (typeof Excel === 'undefined') throw Error('Open this add-in inside Excel.');
       await Excel.run(async context => {
-        const sheet =
-          context.workbook.worksheets.getItemOrNullObject(
-            SHEET
-          );
-
+        const sheet = context.workbook.worksheets.getItemOrNullObject(MASTER);
         sheet.load('isNullObject');
-
         await context.sync();
-
-        if (sheet.isNullObject) {
-          throw new Error(
-            'Worksheet "' + SHEET + '" was not found.'
-          );
-        }
-
+        if (sheet.isNullObject) throw Error('Company Master worksheet was not found.');
         sheet.onChanged.add(onChanged);
-
         await context.sync();
       });
-
-      active = true;
-
-      ensureBatchButton();
-
-      show(
-        'V10.5 READY — MALAYSIA COMPANY RESEARCH\n' +
-
-        'Research all company rows, approve columns individually, then save approved columns separately for one company.\n' +
-
-        'Each separate company save creates its own worksheet backup before writing.\n' +
-
-        'Only verified Malaysia-local candidates may be saved.\n' +
-
-        'L/M/N are GLOBAL PARENT figures; their sources go to the audit.\n' +
-
-        'Existing values, formulas, number formats and AP notes are preserved.'
-      );
-
-    } catch (error) {
-      show(
-        'V10.5 CONNECTION ERROR\n' +
-        errorText(error)
-      );
-
-    } finally {
-      starting = false;
-    }
+      initialized = true;
+      ensureResearchButton();
+      say('V' + VERSION + ' READY. Research companies; Approve individual eligible columns; ' +
+        'Save only that company. Existing Excel headers, values and formulas stay protected.');
+    } catch (error) { say('CONNECTION ERROR: ' + String(error?.message || error)); }
+    finally { initializing = false; }
   }
-
-  if (retry) {
-    retry.addEventListener('click', initialize);
-  }
-
-  ensureBatchButton();
+  if (retry) retry.addEventListener('click', initialize);
+  ensureResearchButton();
   initialize();
-
 })();
